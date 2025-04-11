@@ -279,11 +279,11 @@ runs:
           if [ -n "${{ inputs.proxy-host }}" ]; then
             # Create custom proxychains config
             cat > /tmp/proxychains.conf <<EOF
-strict_chain
-proxy_dns
-[ProxyList]
-${{ inputs.remote-protocol }} ${{ inputs.proxy-host }} ${{ inputs.proxy-port }} ${{ inputs.proxy-user }} ${{ inputs.proxy-private-key }}
-EOF
+            strict_chain
+            proxy_dns
+            [ProxyList]
+            ${{ inputs.remote-protocol }} ${{ inputs.proxy-host }} ${{ inputs.proxy-port }} ${{ inputs.proxy-user }} ${{ inputs.proxy-private-key }}
+            EOF
             proxy_cmd="$proxy_cmd -f /tmp/proxychains.conf"
           fi
         else
