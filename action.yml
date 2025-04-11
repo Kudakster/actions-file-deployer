@@ -24,30 +24,6 @@ inputs:
     description: "FTP/SSH password"
     required: false
     default: ""
-  ssh-private-key:
-    description: "SSH private key of user"
-    required: false
-  proxy:
-    description: "Enable proxy for FTP connection (true, false)"
-    required: true
-    default: false
-  proxy-host:
-    description: "Proxy host"
-    required: false
-  proxy-port:
-    description: "Proxy port"
-    required: false
-    default: 22
-  proxy-forwarding-port:
-    description: "Proxy forwarding port"
-    required: false
-    default: 1080
-  proxy-user:
-    description: "Proxy username"
-    required: false
-  proxy-private-key:
-    description: "Proxy SSH private key of user"
-    required: false
   paths:
     description: "Path mappings in JSON format (add :flat suffix to flatten)"
     required: true
@@ -63,24 +39,6 @@ inputs:
   sync-delta-excludes:
     description: "Files to exclude from delta sync"
     required: false
-  ssh-options:
-    description: "Additional command arguments for SSH client"
-    required: false
-  ftp-options:
-    description: "Additional command arguments for FTP client (lftp)"
-    required: false
-  ftp-mirror-options:
-    description: "Additional command arguments for mirroring (lftp)"
-    required: false
-  ftp-post-sync-commands:
-    description: "Additional ftp commands to run after synchronization (lftp)"
-    required: false
-  webhook:
-    description: "Send webhook event notifications"
-    required: false
-  artifacts:
-    description: "Upload logs to artifacts"
-    required: false
   debug:
     description: "Enable debug information (true, false)"
     required: false
@@ -93,9 +51,6 @@ runs:
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends lftp jq
-        if [ "${{ inputs.proxy }}" == "true" ]; then
-          sudo apt-get install -y --no-install-recommends proxychains
-        fi
 
     - name: "Deploy"
       shell: bash
@@ -105,22 +60,8 @@ runs:
           printf '%.s_' {1..100} && echo ""
         }
 
-        function send_webhook() {
-          [ -z "${{ inputs.webhook }}" ] && return
-          local status="$1"
-          local post_data=$(jq --null-input \
-            --arg status "$status" \
-            --arg repository "${{ github.repository }}" \
-            --arg workflow "${{ github.workflow }}" \
-            --arg job "${{ github.job }}" \
-            --arg run_id "${{ github.run_id }}" \
-            '{"status": $status, "repository": $repository, "workflow": $workflow, "job": $job, "run_id": $run_id}')
-          curl -X POST -H "Content-Type: application/json" -d "$post_data" "${{ inputs.webhook }}"
-        }
-
         # Initialize
         echo "::group::Initialization"
-        [ -n "${{ inputs.webhook }}" ] && send_webhook "start"
 
         # Validate Git repo
         if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != "true" ]; then
@@ -141,7 +82,6 @@ runs:
             remote_path="$remote_mapping"
             flatten_flags["$local_path"]=0
           fi
-          
           path_mappings["$(echo "$local_path" | sed 's:/*$::')"]="$(echo "$remote_path" | sed 's:/*$::')"
         done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "${{ inputs.paths }}")
 
@@ -161,30 +101,20 @@ runs:
         chmod 600 ~/.ssh/config
 
         # Create lftp config
-        cat > ~/.lftprc <<'EOF'
+        cat > ~/.lftprc << 'EOF'
         set ftp:ssl-protect-data true
         set net:timeout 10
         set xfer:parallel 3
         set mirror:parallel-transfer-count 3
-        set sftp:auto-confirm true
+        $([ "${{ inputs.remote-protocol }}" == "sftp" ] && echo "set sftp:auto-confirm true")
         EOF
-        
         echo "::endgroup::"
 
         # File processing
         echo "::group::Prepare files"
         if [ "${{ inputs.sync }}" == "delta" ]; then
           touch ~/files_to_upload ~/files_to_delete ~/override_changes
-          git_previous_commit=""
-
-          # Determine previous commit
-          if [ "${{ github.event_name }}" == "push" ]; then
-            git_previous_commit=${{ github.event.before }}
-          elif [ "${{ github.event_name }}" == "pull_request" ]; then
-            git_previous_commit=${{ github.event.pull_request.base.sha }}
-          else
-            git_previous_commit=$(git rev-parse ${{ github.sha }}^)
-          fi
+          git_previous_commit=$(git rev-parse ${{ github.sha }}^)
 
           if git cat-file -t "$git_previous_commit" &>/dev/null; then
             # Process override folder if specified
@@ -194,39 +124,50 @@ runs:
 
             # Process each path mapping
             for local_path in "${!path_mappings[@]}"; do
-                remote_path="${path_mappings[$local_path]}"
-                
-                # Get changes from main folder (excluding overrides)
-                git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
-                
-                # Filter out overrides
-                if [ -s ~/override_changes ]; then
-                    grep -vFf <(sed "s|^${{ inputs.override-path }}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
-                else
-                    cp ~/main_changes.tmp ~/filtered_changes.tmp
-                fi
+              remote_path="${path_mappings[$local_path]}"
+              
+              # Get changes from main folder (excluding overrides)
+              git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
+              
+              # Filter out overrides if they exist
+              if [ -s ~/override_changes ]; then
+                grep -vFf <(sed "s|^${{ inputs.override-path }}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
+              else
+                cp ~/main_changes.tmp ~/filtered_changes.tmp
+              fi
 
-                # Convert to mapping format
-                awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
-                    {
-                        gsub("^" local "/?", "")
-                        if ($0 != "") {
-                            if (flat == 1) {
-                                # For flat mappings, just use the filename
-                                split($0,parts,"/")
-                                print local "|" $0 " -> " remote "/" parts[length(parts)]
-                            } else {
-                                # For normal mappings, keep the full path
-                                print local "|" $0 " -> " remote "/" $0
-                            }
-                        }
-                    }' ~/filtered_changes.tmp >> ~/files_to_upload
+              # Apply sync-delta-excludes if specified
+              if [ -n "${{ inputs.sync-delta-excludes }}" ]; then
+                grep -vFf <(echo "${{ inputs.sync-delta-excludes }}" | tr ',' '\n') ~/filtered_changes.tmp > ~/filtered_changes2.tmp
+                mv ~/filtered_changes2.tmp ~/filtered_changes.tmp
+              fi
 
-                # Process deletions
-                git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
-                awk -v remote="$remote_path" '{print remote "/" $0}' ~/deletions.tmp >> ~/files_to_delete
+              # Convert to mapping format with proper flat handling
+              awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
+                {
+                  gsub("^" local "/?", "")
+                  if ($0 != "") {
+                    if (flat == 1) {
+                      split($0, parts, "/")
+                      print local "|" $0 " -> " remote "/" parts[length(parts)]
+                    } else {
+                      print local "|" $0 " -> " remote "/" $0
+                    }
+                  }
+                }' ~/filtered_changes.tmp >> ~/files_to_upload
 
-                rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
+              # Process deletions
+              git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
+              awk -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '{
+                if (flat == 1) {
+                  split($0, parts, "/")
+                  print remote "/" parts[length(parts)]
+                } else {
+                  print remote "/" $0
+                }
+              }' ~/deletions.tmp >> ~/files_to_delete
+
+              rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
             done
 
             # Add override changes
@@ -245,6 +186,10 @@ runs:
           fi
         fi
 
+        # Remove duplicates
+        sort -u ~/files_to_upload -o ~/files_to_upload
+        sort -u ~/files_to_delete -o ~/files_to_delete
+
         # Debug output
         if [ "${{ inputs.debug }}" == "true" ]; then
           echo "::group::File Changes"
@@ -262,67 +207,34 @@ runs:
 
         # File transfer
         echo "::group::Transfer files"
-
-        # Remove duplicate entries before processing
-        sort -u ~/files_to_upload -o ~/files_to_upload
-        
         function process_upload() {
           local src="$1"
           local dest="$2"
           local flatten="$3"
 
           if [ "$flatten" -eq 1 ]; then
-            # FLAT MODE - extract just the filename
-            remote_file=$(basename "$src")
+            remote_file="$(basename "$src")"
             echo "FLAT UPLOAD: $src → $dest/$remote_file"
-            ${proxy_cmd} lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
+            lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
               -p "${{ inputs.remote-port }}" \
               -e "mkdir -p \"$dest\"; put -O \"$dest\" \"$src\" -o \"$remote_file\"; quit" \
               "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
           else
-            # NORMAL MODE - preserve full path
             relative_path="${src#$local_path/}"
             echo "NORMAL UPLOAD: $src → $dest/$relative_path"
-            ${proxy_cmd} lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
+            lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
               -p "${{ inputs.remote-port }}" \
               -e "mkdir -p \"$dest/$(dirname "$relative_path")\"; put -O \"$dest/$(dirname "$relative_path")\" \"$src\" -o \"$(basename "$relative_path")\"; quit" \
               "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
           fi
         }
 
-        # Set proxy command if needed - FIXED INDENTATION
-        if [ "false" == "true" ]; then
-          proxy_cmd="proxychains -q"
-          if [ -n "" ]; then
-            # Create custom proxychains config
-            cat > /tmp/proxychains.conf <<'EOF'
-        strict_chain
-        proxy_dns
-        [ProxyList]
-        sftp  22  
-        EOF
-            proxy_cmd="$proxy_cmd -f /tmp/proxychains.conf"
-          fi
-        else
-          proxy_cmd=""
-        fi
-
         # Process uploads
         if [ -s ~/files_to_upload ]; then
-          while read -r line; do
-            src_mapping=$(echo "$line" | awk -F' -> ' '{print $1}')
-            dest_path=$(echo "$line" | awk -F' -> ' '{print $2}')
-            
-            src_path=$(echo "$src_mapping" | cut -d'|' -f1)
-            relative_path=$(echo "$src_mapping" | cut -d'|' -f2)
-
-            # Find matching mapping
-            for local_path in "${!path_mappings[@]}"; do
-              if [[ "$src_path/$relative_path" == "$local_path"* ]]; then
-                process_upload "$src_path/$relative_path" "${path_mappings[$local_path]}" "${flatten_flags[$local_path]}"
-                break
-              fi
-            done
+          while IFS=" -> " read -r src dest; do
+            local_path="${src%|*}"
+            src_file="${src#*|}"
+            process_upload "$src_file" "$dest" "${flatten_flags[$local_path]}"
           done < ~/files_to_upload
         else
           echo "No files to upload"
@@ -331,7 +243,10 @@ runs:
         # Process deletions
         if [ -s ~/files_to_delete ]; then
           echo "Deleting files:"
-          ${proxy_cmd} lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" -p "${{ inputs.remote-port }}" -e "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); ${{ inputs.ftp-post-sync-commands }}; quit" "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
+          lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
+            -p "${{ inputs.remote-port }}" \
+            -e "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); quit" \
+            "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
         else
           echo "No files to delete"
         fi
@@ -339,18 +254,5 @@ runs:
 
         # Cleanup
         echo "::group::Cleanup"
-        [ "${{ inputs.proxy }}" == "true" ] && pkill ssh || true
-        rm -f ~/.netrc ~/ssh_private_key ~/proxy_private_key
-        [ -n "${{ inputs.webhook }}" ] && send_webhook "complete"
+        rm -f ~/.netrc ~/files_to_upload ~/files_to_delete ~/override_changes
         echo "::endgroup::"
-
-    - name: "Upload artifacts"
-      if: ${{ inputs.artifacts == 'true' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: "deployment-logs"
-        path: |
-          ~/files_to_upload
-          ~/files_to_delete
-          ~/transfer_log.txt
-        if-no-files-found: ignore
