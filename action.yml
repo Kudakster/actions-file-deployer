@@ -144,14 +144,17 @@ runs:
 
               # Convert to mapping format with proper flat handling
               awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
-                {
+               {
                   gsub("^" local "/?", "")
                   if ($0 != "") {
                     if (flat == 1) {
-                      split($0, parts, "/")
-                      print local "/" $0 " -> " remote "/" parts[length(parts)]
+                        split($0, parts, "/")
+                        # Only process if this is the deepest mapping
+                        if (!(local ~ /\/[^\/]+$/ && $0 ~ /^[^\/]+$/)) {
+                            print local "/" $0 " -> " remote "/" parts[length(parts)]
+                        }
                     } else {
-                      print local "/" $0 " -> " remote "/" $0
+                        print local "/" $0 " -> " remote "/" $0
                     }
                   }
                 }' ~/filtered_changes.tmp >> ~/files_to_upload
@@ -205,36 +208,30 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer with robust path handling (8-space indented)
+        # File transfer
         echo "::group::Transfer files"
         function process_upload() {
             local src="$1"
             local dest="$2"
             
-            # Clean paths without using sed
-            clean_dest="${dest//[<>|]/_}"
-            abs_src="$GITHUB_WORKSPACE/${src//|/}"
-            
-            echo "UPLOAD: $src → $clean_dest"
+            echo "UPLOAD: $src → $dest"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
                 -p "${{ inputs.remote-port }}" \
                 -e "set cmd:fail-exit true; \
-                    mkdir -p '${clean_dest%/*}'; \
-                    put '$abs_src' -o '$clean_dest'; \
+                    mkdir -p '${dest%/*}'; \
+                    put '$GITHUB_WORKSPACE/$src' -o '$dest'; \
                     quit" \
                 "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
         }
 
-        # Process uploads (8-space indented)
+        # Process uploads with proper deduplication (8 spaces indentation):
         if [ -s ~/files_to_upload ]; then
-            # Clean input file first
-            sed -i 's/[|>]//g' ~/files_to_upload
-            awk '!seen[$0]++' ~/files_to_upload > ~/files_to_upload.tmp
-            mv ~/files_to_upload.tmp ~/files_to_upload
+            # Remove duplicates preferring flat mappings
+            tac ~/files_to_upload | awk -F' -> ' '!seen[$1]++' | tac > ~/files_to_upload.dedup
+            mv ~/files_to_upload.dedup ~/files_to_upload
             
             while IFS=" -> " read -r src dest; do
-                # Basic validation
-                if [[ -f "$GITHUB_WORKSPACE/$src" ]]; then
+                if [ -f "$GITHUB_WORKSPACE/$src" ]; then
                     process_upload "$src" "$dest"
                 else
                     echo "::warning::File not found: $src"
