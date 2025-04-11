@@ -212,19 +212,22 @@ runs:
           local dest="$2"
           local flatten="$3"
 
+          # Get absolute source path
+          local abs_src="$GITHUB_WORKSPACE/$src"
+
           if [ "$flatten" -eq 1 ]; then
             remote_file="$(basename "$src")"
             echo "FLAT UPLOAD: $src → $dest/$remote_file"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
               -p "${{ inputs.remote-port }}" \
-              -e "mkdir -p \"$dest\"; put -O \"$dest\" \"$src\" -o \"$remote_file\"; quit" \
+              -e "mkdir -p \"$dest\"; put -O \"$dest\" \"$abs_src\" -o \"$remote_file\"; quit" \
               "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
           else
             relative_path="${src#$local_path/}"
             echo "NORMAL UPLOAD: $src → $dest/$relative_path"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
               -p "${{ inputs.remote-port }}" \
-              -e "mkdir -p \"$dest/$(dirname "$relative_path")\"; put -O \"$dest/$(dirname "$relative_path")\" \"$src\" -o \"$(basename "$relative_path")\"; quit" \
+              -e "mkdir -p \"$dest/$(dirname "$relative_path")\"; put -O \"$dest/$(dirname "$relative_path")\" \"$abs_src\" -o \"$(basename "$relative_path")\"; quit" \
               "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
           fi
         }
@@ -234,7 +237,9 @@ runs:
           while IFS=" -> " read -r src dest; do
             local_path="${src%|*}"
             src_file="${src#*|}"
-            process_upload "$src_file" "$dest" "${flatten_flags[$local_path]}"
+            # Ensure we're using the correct source path from repository root
+            full_src_path="src/pve/plugins/$src_file"  # Adjust this based on your actual structure
+            process_upload "$full_src_path" "$dest" "${flatten_flags[$local_path]}"
           done < ~/files_to_upload
         else
           echo "No files to upload"
