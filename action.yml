@@ -396,6 +396,19 @@ runs:
         [ -f ~/transfer_log.txt ] && cat ~/transfer_log.txt
 
         echo "::endgroup::"
+        
+
+        echo "::group::Cleanup"
+        
+        [ "${input_proxy}" == "true" ] && sudo pkill ssh
+
+        rm --force --verbose ~/.netrc ~/proxy_private_key ~/ssh_private_key
+        
+        [ "${{inputs.artifacts}}" != "true" ] && rm --force --verbose ~/transfer_log.txt
+        
+        [ "${{inputs.webhook}}" != "" ] && echo "Webhook notification (finish): $(send_webhook "finish")"
+
+        echo "::endgroup::"
 
         exit 0
     - name: "Upload artifacts"
