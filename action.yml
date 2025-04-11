@@ -315,8 +315,6 @@ runs:
                     exit 1
                 fi
             fi
-
-            echo "${{git_previous_commit}}"
             
             if git cat-file -t ${git_previous_commit} &>/dev/null; then
                 # Process each path mapping separately
