@@ -398,30 +398,29 @@ runs:
             done
         else
             # Process uploads
-            while IFS="->" read -r local_mapping remote_mapping; do
-                # Extract local path and file
+            while read -r line; do
+                local_mapping=$(echo "$line" | awk -F' -> ' '{print $1}')
+                remote_mapping=$(echo "$line" | awk -F' -> ' '{print $2}')
+                
                 local_path=$(echo "$local_mapping" | cut -d'|' -f1)
                 relative_path=$(echo "$local_mapping" | cut -d'|' -f2)
                 full_local_path="${local_path}/${relative_path}"
-                full_remote_path="${remote_mapping}"
+                remote_dir=$(dirname "$remote_mapping")
+                remote_filename=$(basename "$remote_mapping")
                 
-                ${proxy_cmd} lftp -c "put -O \"$(dirname "$full_remote_path")\" \"${full_local_path}\""
-            done < <(awk -F' -> ' '{print $1 " " $2}' ~/files_to_upload)
+                echo "Uploading $full_local_path to $remote_mapping"
+                ${proxy_cmd} lftp -c "put -O \"$remote_dir\" \"$full_local_path\" -o \"$remote_filename\""
+            done < ~/files_to_upload
             
             # Process deletes - handle empty file case
             if [ -s ~/files_to_delete ]; then
-                # Create a temporary script to handle deletions in batches
-                echo "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete)" > ~/delete_script.lftp
-                echo "${{inputs.ftp-post-sync-commands}}" >> ~/delete_script.lftp
-                ${proxy_cmd} lftp -f ~/delete_script.lftp
-                rm ~/delete_script.lftp
+                ${proxy_cmd} lftp -c "$(awk '{printf "rm -f \"%s\"; ", $0}' ~/files_to_delete) ${{inputs.ftp-post-sync-commands}}"
             else
                 ${proxy_cmd} lftp -c "${{inputs.ftp-post-sync-commands}}"
             fi
         fi
 
         [ -f ~/transfer_log.txt ] && cat ~/transfer_log.txt
-
         echo "::endgroup::"
         
 
