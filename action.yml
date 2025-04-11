@@ -208,29 +208,37 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer
+        # File transfer with robust path cleaning (8-space YAML indentation)
         echo "::group::Transfer files"
+        function clean_path() {
+            echo "$1" | sed -e 's/[<>|]//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+        }
+
         function process_upload() {
-            local src="$1"
-            local dest="$2"
+            local src=$(clean_path "$1")
+            local dest=$(clean_path "$2")
+            local abs_src="$GITHUB_WORKSPACE/$src"
             
             echo "UPLOAD: $src → $dest"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
                 -p "${{ inputs.remote-port }}" \
                 -e "set cmd:fail-exit true; \
                     mkdir -p '${dest%/*}'; \
-                    put '$GITHUB_WORKSPACE/$src' -o '$dest'; \
+                    put '$abs_src' -o '$dest'; \
                     quit" \
                 "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
         }
 
-        # Process uploads with proper deduplication (8 spaces indentation):
+        # Process uploads with proper cleaning (8-space YAML indentation)
         if [ -s ~/files_to_upload ]; then
-            # Remove duplicates preferring flat mappings
-            tac ~/files_to_upload | awk -F' -> ' '!seen[$1]++' | tac > ~/files_to_upload.dedup
-            mv ~/files_to_upload.dedup ~/files_to_upload
+            # Clean the file first
+            sed -i 's/[<>|]//g' ~/files_to_upload
             
-            while IFS=" -> " read -r src dest; do
+            # Process each file
+            while IFS="->" read -r src dest; do
+                src=$(clean_path "$src")
+                dest=$(clean_path "$dest")
+                
                 if [ -f "$GITHUB_WORKSPACE/$src" ]; then
                     process_upload "$src" "$dest"
                 else
