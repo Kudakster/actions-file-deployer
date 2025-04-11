@@ -330,16 +330,20 @@ runs:
             fi
 
             if git cat-file -t ${git_previous_commit} &>/dev/null; then
-                # Process exclusions - just for the ignore list display
+                # Process exclusions - create ignore list
                 if [ -n "${{inputs.sync-delta-excludes}}" ]; then
                     echo "Processing exclusions..."
-                    echo "${{inputs.sync-delta-excludes}}" | while read -r pattern; do
-                        [ -z "$pattern" ] && continue
+                    # Clean up the input - remove empty lines and trim whitespace
+                    echo "${{inputs.sync-delta-excludes}}" | sed '/^$/d' | while read -r pattern; do
+                        pattern=$(echo "$pattern" | xargs)  # Trim whitespace
                         for local_path in "${!path_mappings[@]}"; do
-                            find "${local_path}" -name "${pattern}" | while read -r full_path; do
-                                relative_path="${full_path#$local_path/}"
-                                echo "${local_path}|${relative_path}" >> ~/files_to_ignore
-                            done
+                            # Use find to locate matching files, handling the pattern properly
+                            if [ -d "${local_path}" ]; then
+                                find "${local_path}" -name "${pattern}" -type f | while read -r full_path; do
+                                    relative_path="${full_path#$local_path/}"
+                                    echo "${local_path}|${relative_path}" >> ~/files_to_ignore
+                                done
+                            fi
                         done
                     done
                 fi
@@ -352,14 +356,14 @@ runs:
                     git diff --diff-filter=ACMRT --name-only ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' > ~/all_changed_files.tmp
                     git diff-tree --diff-filter=D --name-only -t ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' > ~/all_deleted_files.tmp
 
-                    # Apply exclusions by filtering out ignored files
+                    # Apply exclusions if any
                     if [ -s ~/files_to_ignore ]; then
-                        # Create pattern file for grep
+                        # Create pattern file for filtering
                         cut -d'|' -f2 ~/files_to_ignore > ~/ignore_patterns.tmp
                         
-                        # Filter changed files
-                        grep -vFf ~/ignore_patterns.tmp ~/all_changed_files.tmp > ~/files_to_upload.tmp
-                        grep -vFf ~/ignore_patterns.tmp ~/all_deleted_files.tmp > ~/files_to_delete.tmp
+                        # Filter changed files (only keep lines not matching any pattern)
+                        grep -vFf ~/ignore_patterns.tmp ~/all_changed_files.tmp > ~/files_to_upload.tmp || true
+                        grep -vFf ~/ignore_patterns.tmp ~/all_deleted_files.tmp > ~/files_to_delete.tmp || true
                         
                         rm ~/ignore_patterns.tmp
                     else
@@ -384,21 +388,18 @@ runs:
                             }
                         }' ~/files_to_delete.tmp >> ~/files_to_delete
                     
-                    rm ~/all_changed_files.tmp ~/all_deleted_files.tmp ~/files_to_upload.tmp ~/files_to_delete.tmp
+                    # Clean up temp files
+                    rm -f ~/all_changed_files.tmp ~/all_deleted_files.tmp ~/files_to_upload.tmp ~/files_to_delete.tmp
                 done
 
                 # Debug output
                 if [ "${{inputs.debug}}" == "true" ]; then
                     echo "::group::Delta Sync File Lists"
-                    echo "All changed files (before exclusions):"
-                    [ -s ~/all_changed_files.tmp ] && cat ~/all_changed_files.tmp || echo "None"
-                    show_hr
-                    
-                    echo "Files to upload (after exclusions):"
+                    echo "Files to upload:"
                     [ -s ~/files_to_upload ] && cat ~/files_to_upload || echo "None"
                     show_hr
                     
-                    echo "Files to delete (after exclusions):"
+                    echo "Files to delete:"
                     [ -s ~/files_to_delete ] && cat ~/files_to_delete || echo "None"
                     show_hr
                     
