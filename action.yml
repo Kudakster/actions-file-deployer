@@ -312,7 +312,7 @@ runs:
         Message: ${{github.event.head_commit.message}}" && show_hr
 
         if [ "${input_sync}" == "delta" ]; then
-            touch ~/files_to_upload ~/files_to_delete
+            touch ~/files_to_upload ~/files_to_delete ~/files_to_ignore
             git_depth=$(git rev-list --count --all)
             git_previous_commit=""
 
@@ -330,12 +330,30 @@ runs:
             fi
 
             if git cat-file -t ${git_previous_commit} &>/dev/null; then
-                # Convert excludes to proper git format
+                # Process exclusions
+                if [ -n "${{inputs.sync-delta-excludes}}" ]; then
+                    echo "Processing exclusions..."
+                    # For each path mapping, generate full excluded paths
+                    for local_path in "${!path_mappings[@]}"; do
+                        echo "${{inputs.sync-delta-excludes}}" | while read -r pattern; do
+                            # Skip empty lines
+                            [ -z "$pattern" ] && continue
+                            
+                            # Find all matching files in the local path
+                            find "${local_path}" -name "${pattern}" | while read -r full_path; do
+                                # Make path relative to local mapping
+                                relative_path="${full_path#$local_path/}"
+                                echo "${local_path}|${relative_path}" >> ~/files_to_ignore
+                            done
+                        done
+                    done
+                fi
+
+                # Convert excludes to git format
                 exclude_args=""
                 if [ -n "${{inputs.sync-delta-excludes}}" ]; then
-                    # Convert newlines to spaces and add :! prefix for each pattern
                     exclude_args=$(echo "${{inputs.sync-delta-excludes}}" | sed 's/^/:!/;s/^/ /' | tr '\n' ' ')
-                    echo "Excluding patterns: ${exclude_args}"
+                    echo "Exclusion patterns: ${exclude_args}"
                 fi
 
                 for local_path in "${!path_mappings[@]}"; do
@@ -345,23 +363,19 @@ runs:
                     git diff --diff-filter=ACMRT --name-only ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' ${exclude_args} > ~/files_to_upload.tmp
                     git diff-tree --diff-filter=D --name-only -t ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' ${exclude_args} > ~/files_to_delete.tmp
                     
-                    # Convert to relative paths and add remote path prefix
+                    # Convert to mapping format
                     awk -v local="$local_path" -v remote="$remote_path" '
                         {
-                            # Make path relative to local mapping
                             gsub("^" local "/?", "")
                             if ($0 != "") {
-                                # Store as: local_path|relative_path -> remote_path/relative_path
                                 print local "|" $0 " -> " remote "/" $0
                             }
                         }' ~/files_to_upload.tmp >> ~/files_to_upload
                         
                     awk -v local="$local_path" -v remote="$remote_path" '
                         {
-                            # Make path relative to local mapping
                             gsub("^" local "/?", "")
                             if ($0 != "") {
-                                # Store as: remote_path/relative_path
                                 print remote "/" $0
                             }
                         }' ~/files_to_delete.tmp >> ~/files_to_delete
@@ -370,10 +384,28 @@ runs:
                 done
 
                 # Debug output
-                [ "${{inputs.debug}}" == "true" ] && (echo "Files to upload:" && cat ~/files_to_upload && show_hr)
-                [ "${{inputs.debug}}" == "true" ] && (echo "Files to delete:" && cat ~/files_to_delete && show_hr)
+                if [ "${{inputs.debug}}" == "true" ]; then
+                    echo "::group::Delta Sync File Lists"
+                    echo "Files to upload:"
+                    [ -s ~/files_to_upload ] && cat ~/files_to_upload || echo "None"
+                    show_hr
+                    
+                    echo "Files to delete:"
+                    [ -s ~/files_to_delete ] && cat ~/files_to_delete || echo "None"
+                    show_hr
+                    
+                    echo "Files being ignored:"
+                    if [ -s ~/files_to_ignore ]; then
+                        while IFS="|" read -r local_path relative_path; do
+                            echo "${local_path}/${relative_path}"
+                        done < ~/files_to_ignore
+                    else
+                        echo "None"
+                    fi
+                    echo "::endgroup::"
+                fi
             else
-                echo "::warning::Invalid base commit for delta synchronization: ${git_previous_commit}. Please ignore if this is an initial commit or newly created branch."
+                echo "::warning::Invalid base commit for delta synchronization: ${git_previous_commit}"
             fi
         fi
 
