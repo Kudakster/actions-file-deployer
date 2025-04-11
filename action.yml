@@ -49,20 +49,16 @@ inputs:
   proxy-private-key:
     description: "Proxy SSH private key of user"
     required: false
-  local-path:
-    description: "Local path to repository"
+  paths:
+    description: "Path mappings in JSON format (local->remote)"
     required: true
-    default: .
-  remote-path:
-    description: "Remote path on host"
-    required: true
-    default: .
+    default: '{".": "."}'
   sync:
     description: "File synchronization (delta, full)"
     required: true
     default: "delta"
   sync-delta-excludes:
-    description: "Files to exclude from delta sync"
+    description: "Files to exclude from delta sync (relative to repository root)"
     required: false
   ssh-options:
     description: "Additional command arguments for SSH client"
@@ -128,11 +124,14 @@ runs:
 
         echo "Initialize inputs"
 
-        local_path_unslash=$(echo "${{inputs.local-path}}" | sed 's:/*$::')
-        local_path_slash="${local_path_unslash}/"
-
-        remote_path_unslash=$(realpath --canonicalize-missing '${{inputs.remote-path}}')
-        remote_path_slash="${remote_path_unslash}/"
+        # Parse paths JSON into associative array
+        declare -A path_mappings
+        while IFS="=" read -r local_path remote_path; do
+            # Clean paths (remove trailing slashes)
+            local_path_clean=$(echo "$local_path" | sed 's:/*$::')
+            remote_path_clean=$(echo "$remote_path" | sed 's:/*$::')
+            path_mappings["$local_path_clean"]="$remote_path_clean"
+        done < <(jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" <<< "${{inputs.paths}}")
 
         input_remote_password="${{inputs.remote-password}}"
         if [ "${{inputs.remote-password}}" == "" ]; then
@@ -165,8 +164,6 @@ runs:
 
         echo "::endgroup::"
 
-
-
         if [ "${{inputs.debug}}" == "true" ]; then
           echo "::group::Debug"
 
@@ -176,10 +173,13 @@ runs:
 
           echo "Inputs:" && echo "${{toJSON(inputs)}}"
 
+          echo "Path mappings:"
+          for local in "${!path_mappings[@]}"; do
+              echo "  $local -> ${path_mappings[$local]}"
+          done
+
           echo "::endgroup::"
         fi
-
-
 
         echo "::group::Install packages"
 
@@ -192,8 +192,6 @@ runs:
         sudo apt-get ${apt_quiet} update && sudo apt-get ${apt_quiet} --no-install-recommends --yes install lftp ${proxy_cmd}
 
         echo "::endgroup::"
-
-
 
         echo "::group::Configurations"
 
@@ -261,8 +259,6 @@ runs:
 
         echo "::endgroup::"
 
-
-
         if [ "${input_proxy}" == "true" ]; then
           echo "::group::Setup proxy"
 
@@ -281,8 +277,6 @@ runs:
           echo "::endgroup::"
         fi
 
-
-
         echo "::group::Prepare files"
 
         echo "Event: ${{github.event_name}}
@@ -290,89 +284,110 @@ runs:
         Committer: ${{github.actor}}
         Message: ${{github.event.head_commit.message}}" && show_hr
 
-        echo "${{github.sha}}" > "${local_path_slash}.deploy-revision" && echo "File created: ${local_path_slash}.deploy-revision" && cat "${local_path_slash}.deploy-revision" && show_hr
-
         if [ "${input_sync}" == "delta" ]; then
-          touch ~/files_to_upload ~/files_to_delete
-          git_depth=$(git rev-list --count --all)
-          git_previous_commit=""
+            touch ~/files_to_upload ~/files_to_delete
+            git_depth=$(git rev-list --count --all)
+            git_previous_commit=""
 
-          if [ "${git_depth}" -gt 1 ]; then
-            if [ "${{github.event_name}}" == "push" ]; then
-              git_previous_commit=${{github.event.before}}
-            elif [ "${{github.event_name}}" == "pull_request" ]; then
-              git_previous_commit=${{github.event.pull_request.base.sha}}
-            elif [ "${{github.event_name}}" == "workflow_dispatch" ]; then
-              git_previous_commit=$(git rev-parse ${{github.sha}}^)
+            if [ "${git_depth}" -gt 1 ]; then
+                if [ "${{github.event_name}}" == "push" ]; then
+                    git_previous_commit=${{github.event.before}}
+                elif [ "${{github.event_name}}" == "pull_request" ]; then
+                    git_previous_commit=${{github.event.pull_request.base.sha}}
+                elif [ "${{github.event_name}}" == "workflow_dispatch" ]; then
+                    git_previous_commit=$(git rev-parse ${{github.sha}}^)
+                else
+                    echo "::error::Event not supported for delta synchronization: ${{github.event_name}}. Supported events are 'push', 'pull_request' and 'workflow_dispatch'."
+                    exit 1
+                fi
+            fi
+
+            if git cat-file -t ${git_previous_commit} &>/dev/null; then
+                # Process each path mapping separately
+                exclude_args=""
+                if [ -n "${{inputs.sync-delta-excludes}}" ]; then
+                    # Handle both space-separated and newline-separated lists
+                    exclude_args=$(echo "${{inputs.sync-delta-excludes}}" | tr '\n' ' ' | xargs -n1 printf ":!%s ")
+                fi
+
+                for local_path in "${!path_mappings[@]}"; do
+                    remote_path="${path_mappings[$local_path]}"
+                    
+                    # Get changed files for this mapping
+                    git diff --diff-filter=ACMRT --name-only ${git_previous_commit}..${{github.sha}} -- "$local_path" ':!/.git*' ${exclude_args} >> ~/files_to_upload.tmp
+                    git diff-tree --diff-filter=D --name-only -t ${git_previous_commit}..${{github.sha}} -- "$local_path" ':!/.git*' ${exclude_args} >> ~/files_to_delete.tmp
+                    
+                    # Convert to relative paths and add remote path prefix
+                    awk -v local="$local_path" -v remote="$remote_path" '
+                        {
+                            # Make path relative to local mapping
+                            gsub("^" local "/?", "")
+                            if ($0 != "") {
+                                # Store as: local_path|relative_path -> remote_path/relative_path
+                                print local "|" $0 " -> " remote "/" $0
+                            }
+                        }' ~/files_to_upload.tmp >> ~/files_to_upload
+                        
+                    awk -v local="$local_path" -v remote="$remote_path" '
+                        {
+                            # Make path relative to local mapping
+                            gsub("^" local "/?", "")
+                            if ($0 != "") {
+                                # Store as: remote_path/relative_path
+                                print remote "/" $0
+                            }
+                        }' ~/files_to_delete.tmp >> ~/files_to_delete
+                        
+                    rm ~/files_to_upload.tmp ~/files_to_delete.tmp
+                done
+
+                # Debug output
+                [ "${{inputs.debug}}" == "true" ] && (echo "Files to upload:" && cat ~/files_to_upload && show_hr)
+                [ "${{inputs.debug}}" == "true" ] && (echo "Files to delete:" && cat ~/files_to_delete && show_hr)
+
+                if [ "${{inputs.artifacts}}" == "true" ]; then
+                    echo "Copy transfer artifacts" && mkdir -p ~/transfer_files
+                    while IFS="->" read -r local_mapping remote_mapping; do
+                        local_path=$(echo "$local_mapping" | cut -d'|' -f1)
+                        relative_path=$(echo "$local_mapping" | cut -d'|' -f2)
+                        mkdir -p ~/transfer_files/$(dirname "$local_path/$relative_path")
+                        cp "$local_path/$relative_path" ~/transfer_files/"$local_path/$relative_path"
+                    done < <(awk -F' -> ' '{print $1 " " $2}' ~/files_to_upload)
+                fi
             else
-              echo "::error::Event not supported for delta synchronization: ${{github.event_name}}. Supported events are 'push', 'pull_request' and 'workflow_dispatch'."
-              exit 1
+                echo "::warning::Invalid base commit for delta synchronization: ${git_previous_commit}. Please ignore if this is an initial commit or newly created branch."
             fi
-          else
-            echo "::error::Commit history not found for delta synchronization. Please ensure you have 'fetch-depth: 0' option in checkout action. Please ignore if this is an initial commit or newly created branch."
-            exit 1
-          fi
-
-          echo "Previous Revision: https://github.com/${{github.repository}}/commit/${git_previous_commit}" && show_hr
-
-          # ${proxy_cmd} lftp -c "set log:enabled/xfer false; get -O ~ \"${remote_path_slash}.deploy-revision\"; exit 0"
-          # echo -n "Remote Revision: " && [ -f ~/.deploy-revision ] && cat ~/.deploy-revision || echo ""
-          # show_hr
-
-          if git cat-file -t ${git_previous_commit} &>/dev/null; then
-            git diff --diff-filter=ACMRT --name-only ${git_previous_commit}..${{github.sha}} -- ${local_path_unslash} ':!/.git*' ${{inputs.sync-delta-excludes}} > ~/files_to_upload
-            git diff-tree --diff-filter=D --name-only -t ${git_previous_commit}..${{github.sha}} -- ${local_path_unslash} ':!/.git*' ${{inputs.sync-delta-excludes}} > ~/files_to_delete
-
-            sed --in-place --regexp-extended "s#(.*)#realpath --canonicalize-missing --relative-to=$local_path_unslash \1#e" ~/files_to_upload
-            sed --in-place --regexp-extended "s#(.*)#realpath --canonicalize-missing --relative-to=$local_path_unslash \1#e" ~/files_to_delete
-
-            echo "File created: ~/files_to_upload" && cat ~/files_to_upload && show_hr
-            echo "File created: ~/files_to_delete" && cat ~/files_to_delete && show_hr
-
-            if [ "${{inputs.artifacts}}" == "true" ]; then
-              echo "Copy transfer artifacts" && mkdir ~/transfer_files && rsync --verbose --files-from=$HOME/files_to_upload ${local_path_slash} ~/transfer_files/
-            fi
-          else
-            echo "::warning::Invalid base commit for delta synchronization: ${git_previous_commit}. Please ignore if this is an initial commit or newly created branch."
-          fi
         fi
 
         echo "::endgroup::"
 
-
-
         echo "::group::Transfer files"
 
-        echo "Protocol: ${{inputs.remote-protocol}}
-        Synchronization: ${input_sync}
-        Local path: ${local_path_unslash}
-        Remote path: ${remote_path_unslash}"
-
-        [ "${input_sync}" == "delta" ] && echo -e "Upload files: $(wc --lines < ~/files_to_upload)\nDelete files: $(wc --lines < ~/files_to_delete)"
-
-        show_hr
-
-        touch "${local_path_slash}.deploy-running"
-
         if [ "${input_sync}" == "full" ]; then
-          ${proxy_cmd} lftp -c "put -O \"${remote_path_unslash}\" \"${local_path_slash}.deploy-running\";
-            mirror --exclude-glob=.git*/ --max-errors=10 --reverse ${{inputs.ftp-mirror-options}} ${local_path_unslash} ${remote_path_unslash};
-            rm -f \"${remote_path_slash}.deploy-running\";
-            ${{inputs.ftp-post-sync-commands}}"
+            for local_path in "${!path_mappings[@]}"; do
+                remote_path="${path_mappings[$local_path]}"
+                echo "Syncing $local_path -> $remote_path"
+                ${proxy_cmd} lftp -c "mirror --exclude-glob=.git*/ --max-errors=10 --reverse ${{inputs.ftp-mirror-options}} ${local_path} ${remote_path}; ${{inputs.ftp-post-sync-commands}}"
+            done
         else
-          ${proxy_cmd} lftp -c "lcd \"${local_path_unslash}\";
-            put -O \"${remote_path_unslash}\" \"${local_path_slash}.deploy-running\";
-            mput -d -O \"${remote_path_unslash}\" .deploy-revision $(awk '{ printf "\"%s\" ", $0 }' ~/files_to_upload);
-            rm -f \"${remote_path_slash}.deploy-check\" $(awk -v REMOTEPATH=\"${remote_path_slash}\" '{ printf "\"%s%s\" ", REMOTEPATH, $0 }' ~/files_to_delete);
-            rm -f \"${remote_path_slash}.deploy-running\";
-            ${{inputs.ftp-post-sync-commands}}"
+            # Process uploads
+            while IFS="->" read -r local_mapping remote_mapping; do
+                # Extract local path and file
+                local_path=$(echo "$local_mapping" | cut -d'|' -f1)
+                relative_path=$(echo "$local_mapping" | cut -d'|' -f2)
+                full_local_path="${local_path}/${relative_path}"
+                full_remote_path="${remote_mapping}"
+                
+                ${proxy_cmd} lftp -c "put -O \"$(dirname "$full_remote_path")\" \"${full_local_path}\""
+            done < <(awk -F' -> ' '{print $1 " " $2}' ~/files_to_upload)
+            
+            # Process deletes
+            ${proxy_cmd} lftp -c "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); ${{inputs.ftp-post-sync-commands}}"
         fi
 
         [ -f ~/transfer_log.txt ] && cat ~/transfer_log.txt
 
         echo "::endgroup::"
-
-
 
         echo "::group::Cleanup"
 
