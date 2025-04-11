@@ -207,13 +207,19 @@ runs:
               fi
 
               # Convert to mapping format
-              awk -v local="$local_path" -v remote="$remote_path" '
-                {
-                  gsub("^" local "/?", "")
-                  if ($0 != "") {
-                    print local "|" $0 " -> " remote "/" $0
-                  }
-                }' ~/filtered_changes.tmp >> ~/files_to_upload
+              awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
+          {
+            gsub("^" local "/?", "")
+            if ($0 != "") {
+              if (flat == 1) {
+                # For flat mappings, just use the filename
+                print local "|" $0 " -> " remote "/" $(split($0,parts,"/"); parts[length(parts)]}'
+              } else {
+                # For normal mappings, keep the full path
+                print local "|" $0 " -> " remote "/" $0
+              }
+            }
+          }' ~/filtered_changes.tmp >> ~/files_to_upload
 
               # Process deletions
               git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
@@ -255,23 +261,29 @@ runs:
 
         # File transfer
         echo "::group::Transfer files"
+
+        # Remove duplicate entries before processing
+        sort -u ~/files_to_upload -o ~/files_to_upload
+        
         function process_upload() {
           local src="$1"
           local dest="$2"
           local flatten="$3"
 
           if [ "$flatten" -eq 1 ]; then
-            # FLAT MODE - upload directly to destination folder without subfolders
-            remote_file="$(basename "$src")"
+            # FLAT MODE - extract just the filename
+            remote_file=$(basename "$src")
             echo "FLAT UPLOAD: $src → $dest/$remote_file"
-            ${proxy_cmd} lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" -p "${{ inputs.remote-port }}" \
+            ${proxy_cmd} lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
+              -p "${{ inputs.remote-port }}" \
               -e "mkdir -p \"$dest\"; put -O \"$dest\" \"$src\" -o \"$remote_file\"; quit" \
               "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
           else
-            # NORMAL MODE - preserve folder structure
+            # NORMAL MODE - preserve full path
             relative_path="${src#$local_path/}"
             echo "NORMAL UPLOAD: $src → $dest/$relative_path"
-            ${proxy_cmd} lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" -p "${{ inputs.remote-port }}" \
+            ${proxy_cmd} lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
+              -p "${{ inputs.remote-port }}" \
               -e "mkdir -p \"$dest/$(dirname "$relative_path")\"; put -O \"$dest/$(dirname "$relative_path")\" \"$src\" -o \"$(basename "$relative_path")\"; quit" \
               "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
           fi
