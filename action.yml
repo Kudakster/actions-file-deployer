@@ -1,5 +1,4 @@
 name: "FTP/SFTP file deployer"
-
 description: "Advanced deployment with override support and flexible path mapping"
 
 branding:
@@ -89,6 +88,15 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: "Install dependencies"
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends lftp
+        if [ "${{inputs.proxy}}" == "true" ]; then
+          sudo apt-get install -y --no-install-recommends proxychains
+        fi
+
     - name: "Deploy"
       shell: bash
       run: |
@@ -145,11 +153,6 @@ runs:
           done
           show_hr
         fi
-
-        # Install dependencies
-        echo "::group::Install packages"
-        apt-get update -qq && apt-get install -y --no-install-recommends lftp $([ "${{inputs.proxy}}" == "true" ] && echo "proxychains")
-        echo "::endgroup::"
 
         # Setup configurations
         echo "::group::Configuration"
@@ -262,13 +265,30 @@ runs:
           if [ "$flatten" -eq 1 ]; then
             remote_file="$(basename "$src")"
             echo "FLAT: $src → $dest/$remote_file"
-            ${proxy_cmd} lftp -c "put -O \"$dest\" \"$src\" -o \"$remote_file\""
+            ${proxy_cmd} lftp -c "open -u ${{inputs.remote-user}},${{inputs.remote-password}} -p ${{inputs.remote-port}} ${{inputs.remote-protocol}}://${{inputs.remote-host}}; put -O \"$dest\" \"$src\" -o \"$remote_file\""
           else
             relative_path="${src#$local_path/}"
             echo "NORMAL: $src → $dest/$relative_path"
-            ${proxy_cmd} lftp -c "put -O \"$dest/$(dirname "$relative_path")\" \"$src\" -o \"$(basename "$relative_path")\""
+            ${proxy_cmd} lftp -c "open -u ${{inputs.remote-user}},${{inputs.remote-password}} -p ${{inputs.remote-port}} ${{inputs.remote-protocol}}://${{inputs.remote-host}}; put -O \"$dest/$(dirname "$relative_path")\" \"$src\" -o \"$(basename "$relative_path")\""
           fi
         }
+
+        # Set proxy command if needed
+        if [ "${{inputs.proxy}}" == "true" ]; then
+          proxy_cmd="proxychains -q"
+          if [ -n "${{inputs.proxy-host}}" ]; then
+            proxy_cmd="$proxy_cmd -f /etc/proxychains.conf"
+            # Create custom proxychains config
+            cat > /tmp/proxychains.conf <<EOF
+            strict_chain
+            proxy_dns
+            [ProxyList]
+            ${{inputs.remote-protocol}} ${{inputs.proxy-host}} ${{inputs.proxy-port}} ${{inputs.proxy-user}} ${{inputs.proxy-private-key}}
+            EOF
+          fi
+        else
+          proxy_cmd=""
+        fi
 
         # Process uploads
         while read -r line; do
@@ -291,7 +311,7 @@ runs:
         # Process deletions
         if [ -s ~/files_to_delete ]; then
           echo "Deleting files:"
-          ${proxy_cmd} lftp -c "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); ${{inputs.ftp-post-sync-commands}}"
+          ${proxy_cmd} lftp -c "open -u ${{inputs.remote-user}},${{inputs.remote-password}} -p ${{inputs.remote-port}} ${{inputs.remote-protocol}}://${{inputs.remote-host}}; rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); ${{inputs.ftp-post-sync-commands}}"
         fi
         echo "::endgroup::"
 
@@ -303,6 +323,7 @@ runs:
         echo "::endgroup::"
 
         exit 0
+
     - name: "Upload artifacts"
       if: ${{ inputs.artifacts == 'true' }}
       uses: actions/upload-artifact@v4
