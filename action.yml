@@ -212,19 +212,19 @@ runs:
           local dest="$2"
           local flatten="$3"
 
-          # Get absolute source path
+          # Get absolute source path from repository root
           local abs_src="$GITHUB_WORKSPACE/$src"
 
           if [ "$flatten" -eq 1 ]; then
             remote_file="$(basename "$src")"
-            echo "FLAT UPLOAD: $src → $dest/$remote_file"
+            echo "FLAT UPLOAD: $abs_src → $dest/$remote_file"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
               -p "${{ inputs.remote-port }}" \
               -e "mkdir -p \"$dest\"; put -O \"$dest\" \"$abs_src\" -o \"$remote_file\"; quit" \
               "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
           else
             relative_path="${src#$local_path/}"
-            echo "NORMAL UPLOAD: $src → $dest/$relative_path"
+            echo "NORMAL UPLOAD: $abs_src → $dest/$relative_path"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
               -p "${{ inputs.remote-port }}" \
               -e "mkdir -p \"$dest/$(dirname "$relative_path")\"; put -O \"$dest/$(dirname "$relative_path")\" \"$abs_src\" -o \"$(basename "$relative_path")\"; quit" \
@@ -237,9 +237,18 @@ runs:
           while IFS=" -> " read -r src dest; do
             local_path="${src%|*}"
             src_file="${src#*|}"
-            # Ensure we're using the correct source path from repository root
-            full_src_path="src/pve/plugins/$src_file"  # Adjust this based on your actual structure
-            process_upload "$full_src_path" "$dest" "${flatten_flags[$local_path]}"
+            # Construct full source path correctly
+            if [[ "$local_path" == *"modified"* ]] || [[ "$local_path" == *"rmplugins"* ]] || [[ "$local_path" == *"szplugins"* ]]; then
+              full_src_path="$local_path/$src_file"
+            else
+              full_src_path="$local_path/$src_file"
+            fi
+            # Verify file exists before uploading
+            if [ -f "$GITHUB_WORKSPACE/$full_src_path" ]; then
+              process_upload "$full_src_path" "$dest" "${flatten_flags[$local_path]}"
+            else
+              echo "::warning::File not found: $full_src_path"
+            fi
           done < ~/files_to_upload
         else
           echo "No files to upload"
