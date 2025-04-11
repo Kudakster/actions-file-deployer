@@ -205,41 +205,39 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer section with proper escaping (8 spaces for YAML)
+        # File transfer with robust path handling (8-space indented)
         echo "::group::Transfer files"
         function process_upload() {
             local src="$1"
             local dest="$2"
             
-            # Clean destination path and ensure proper escaping
-            clean_dest=$(echo "$dest" | sed 's/[<>|&]/\\&/g')
-            clean_src=$(echo "$GITHUB_WORKSPACE/$src" | sed 's/[<>|&]/\\&/g')
+            # Clean paths without using sed
+            clean_dest="${dest//[<>|]/_}"
+            abs_src="$GITHUB_WORKSPACE/${src//|/}"
             
             echo "UPLOAD: $src → $clean_dest"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
                 -p "${{ inputs.remote-port }}" \
                 -e "set cmd:fail-exit true; \
-                    mkdir -p '$(dirname "$clean_dest" | sed \"s/'/\\\\'/g\")'; \
-                    put '$(echo "$clean_src" | sed \"s/'/\\\\'/g\")' -o '$(echo "$clean_dest" | sed \"s/'/\\\\'/g\")'; \
+                    mkdir -p '${clean_dest%/*}'; \
+                    put '$abs_src' -o '$clean_dest'; \
                     quit" \
                 "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
         }
 
-        # Process uploads (8 spaces for YAML)
+        # Process uploads (8-space indented)
         if [ -s ~/files_to_upload ]; then
-            # Proper deduplication that maintains order
-            awk '!x[$0]++' ~/files_to_upload > ~/files_to_upload.tmp
+            # Clean input file first
+            sed -i 's/[|>]//g' ~/files_to_upload
+            awk '!seen[$0]++' ~/files_to_upload > ~/files_to_upload.tmp
             mv ~/files_to_upload.tmp ~/files_to_upload
             
             while IFS=" -> " read -r src dest; do
-                # Remove any malformed characters from paths
-                clean_src=$(echo "$src" | tr -d '|>')
-                clean_dest=$(echo "$dest" | tr -d '|>')
-                
-                if [ -f "$GITHUB_WORKSPACE/$clean_src" ]; then
-                    process_upload "$clean_src" "$clean_dest"
+                # Basic validation
+                if [[ -f "$GITHUB_WORKSPACE/$src" ]]; then
+                    process_upload "$src" "$dest"
                 else
-                    echo "::warning::File not found: $clean_src"
+                    echo "::warning::File not found: $src"
                 fi
             done < ~/files_to_upload
         else
