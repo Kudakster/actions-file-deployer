@@ -205,14 +205,14 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer with guaranteed working LFTP commands (8-space YAML indent)
+        # File transfer with fixed LFTP script (8-space YAML indent)
         echo "::group::Transfer files"
         function process_upload() {
             local src="$1"
             local dest="$2"
             
-            # Create secure LFTP script file
-            cat << LFTP_SCRIPT > ~/lftp_commands
+            # Create secure LFTP script file with proper indentation
+            cat > ~/lftp_commands <<'LFTP_SCRIPT'
             set cmd:fail-exit true
             mkdir -p "${dest%/*}"
             put "$GITHUB_WORKSPACE/$src" -o "$dest"
@@ -227,7 +227,7 @@ runs:
             rm -f ~/lftp_commands
         }
 
-        # Process uploads with tab-separated paths (8-space YAML indent)
+        # Process uploads (8-space YAML indent)
         if [ -s ~/files_to_upload ]; then
             while IFS=$'\t' read -r src dest; do
                 if [ -f "$GITHUB_WORKSPACE/$src" ]; then
