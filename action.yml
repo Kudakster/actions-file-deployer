@@ -1,6 +1,6 @@
 name: "FTP/SFTP file deployer"
 
-description: "Fast and customizable deployment with parallel connections and proxy support. Deploy only changed files or do full sync."
+description: "Advanced deployment with override support and flexible path mapping"
 
 branding:
   icon: "upload"  
@@ -50,15 +50,19 @@ inputs:
     description: "Proxy SSH private key of user"
     required: false
   paths:
-    description: "Path mappings in JSON format (local->remote)"
+    description: "Path mappings in JSON format (add :flat suffix to flatten)"
     required: true
     default: '{".": "."}'
+  override-path:
+    description: "Path to server-specific override folder"
+    required: false
+    default: ""
   sync:
     description: "File synchronization (delta, full)"
     required: true
     default: "delta"
   sync-delta-excludes:
-    description: "Files to exclude from delta sync (relative to repository root)"
+    description: "Files to exclude from delta sync"
     required: false
   ssh-options:
     description: "Additional command arguments for SSH client"
@@ -88,392 +92,224 @@ runs:
     - name: "Deploy"
       shell: bash
       run: |
-        echo "::group::Initialization"
-
+        # Helper functions
         function show_hr() {
           printf '%.s_' {1..100} && echo ""
         }
 
         function send_webhook() {
+          [ -z "${{inputs.webhook}}" ] && return
           local status="$1"
           local post_data=$(jq --null-input \
-          --arg timestamp `date +%s` \
-          --arg status "${status}" \
-          --arg repository "${{ github.repository }}" \
-          --arg workflow "${{ github.workflow }}" \
-          --arg job "${{ github.job }}" \
-          --arg run_id "${{ github.run_id }}" \
-          --arg ref "${{ github.ref }}" \
-          --arg event_name "${{ github.event_name }}" \
-          --arg actor "${{ github.actor }}" \
-          --arg message "${{ github.event.head_commit.message }}" \
-          --arg revision "${{ github.sha }}" \
-          '{"timestamp": $timestamp, "status": $status, "repository": $repository, "workflow": $workflow, "job": $job, "run_id": $run_id, "ref": $ref, "event_name": $event_name, "actor": $actor, "message": $message, "revision": $revision}')
-
-          curl --data "${post_data}" --header "Content-Type: application/json" --max-time 30 --show-error --silent --user-agent "GitHub Workflow" "${{inputs.webhook}}"
+            --arg status "$status" \
+            --arg repository "${{ github.repository }}" \
+            --arg workflow "${{ github.workflow }}" \
+            --arg job "${{ github.job }}" \
+            --arg run_id "${{ github.run_id }}" \
+            '{"status": $status, "repository": $repository, "workflow": $workflow, "job": $job, "run_id": $run_id}')
+          curl -X POST -H "Content-Type: application/json" -d "$post_data" "${{inputs.webhook}}"
         }
 
-        [ "${{inputs.webhook}}" != "" ] && echo "Webhook notification (start): $(send_webhook "start")"
+        # Initialize
+        echo "::group::Initialization"
+        [ -n "${{inputs.webhook}}" ] && send_webhook "start"
 
-        echo "Check repository"
-
+        # Validate Git repo
         if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" != "true" ]; then
-          echo "::error::Git repository not found. Please ensure you have a checkout step before this step."
+          echo "::error::Git repository not found"
           exit 1
         fi
 
-        echo "Initialize inputs"
+        # Parse path mappings
+        declare -A path_mappings
+        declare -A flatten_flags
+        FLATTEN_KEYWORD=":flat"
 
-        echo "Initialize paths mapping"
+        while IFS="=" read -r local_path remote_mapping; do
+          if [[ "$remote_mapping" == *"$FLATTEN_KEYWORD"* ]]; then
+            remote_path="${remote_mapping%$FLATTEN_KEYWORD}"
+            flatten_flags["$local_path"]=1
+          else
+            remote_path="$remote_mapping"
+            flatten_flags["$local_path"]=0
+          fi
+          
+          path_mappings["$(echo "$local_path" | sed 's:/*$::')"]="$(echo "$remote_path" | sed 's:/*$::')"
+        done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "${{inputs.paths}}")
 
-        # Clean and validate the JSON input
-        paths_json=$(echo "${{inputs.paths}}" | sed 's/^ *//;s/ *$//')
-        if [[ ! "$paths_json" =~ ^\{.*\}$ ]]; then
-            paths_json="{$paths_json}"
+        # Debug output
+        if [ "${{inputs.debug}}" == "true" ]; then
+          echo "Path Mappings:"
+          for path in "${!path_mappings[@]}"; do
+            echo "  $path → ${path_mappings[$path]} $([ ${flatten_flags[$path]} -eq 1 ] && echo "(FLAT)")"
+          done
+          show_hr
         fi
 
-        # Parse paths JSON into associative array
-        declare -A path_mappings
-        while IFS="=" read -r local_path remote_path; do
-            # Clean paths (remove trailing slashes)
-            local_path_clean=$(echo "$local_path" | sed 's:/*$::')
-            remote_path_clean=$(echo "$remote_path" | sed 's:/*$::')
-            path_mappings["$local_path_clean"]="$remote_path_clean"
-            if [ "${{inputs.debug}}" == "true" ]; then
-                echo "  Mapping: '$local_path_clean' -> '$remote_path_clean'"
-            fi
-        done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$paths_json" 2>/dev/null)
+        # Install dependencies
+        echo "::group::Install packages"
+        apt-get update -qq && apt-get install -y --no-install-recommends lftp $([ "${{inputs.proxy}}" == "true" ] && echo "proxychains")
+        echo "::endgroup::"
 
-        if [ ${#path_mappings[@]} -eq 0 ]; then
-            echo "::error::Failed to parse paths input. Please check the format."
-            echo "Received paths input: '${{inputs.paths}}'"
-            echo "Attempted to parse as: '$paths_json'"
-            exit 1
+        # Setup configurations
+        echo "::group::Configuration"
+        mkdir -p ~/.ssh
+        echo -e "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null" > ~/.ssh/config
+        chmod 600 ~/.ssh/config
+
+        # Create lftp config
+        cat > ~/.lftprc <<EOF
+        set ftp:ssl-protect-data true
+        set net:timeout 10
+        set xfer:parallel 3
+        set mirror:parallel-transfer-count 3
+        $([ "${{inputs.remote-protocol}}" == "sftp" ] && echo "set sftp:auto-confirm true")
+        $([ -n "${{inputs.ssh-private-key}}" ] && echo "set sftp:connect-program \"ssh -a -x -i ~/ssh_private_key ${{inputs.ssh-options}}\"")
+        ${{inputs.ftp-options}}
+        EOF
+        
+        echo "::endgroup::"
+
+        # File processing
+        echo "::group::Prepare files"
+        if [ "${{inputs.sync}}" == "delta" ]; then
+          touch ~/files_to_upload ~/files_to_delete ~/override_changes
+          git_previous_commit=""
+
+          # Determine previous commit
+          if [ "${{github.event_name}}" == "push" ]; then
+            git_previous_commit=${{github.event.before}}
+          elif [ "${{github.event_name}}" == "pull_request" ]; then
+            git_previous_commit=${{github.event.pull_request.base.sha}}
+          else
+            git_previous_commit=$(git rev-parse ${{github.sha}}^)
+          fi
+
+          if git cat-file -t "$git_previous_commit" &>/dev/null; then
+            # Process override folder if specified
+            if [ -n "${{inputs.override-path}}" ] && [ -d "${{inputs.override-path}}" ]; then
+              git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{github.sha}} -- "${{inputs.override-path}}" > ~/override_changes
+            fi
+
+            # Process each path mapping
+            for local_path in "${!path_mappings[@]}"; do
+              remote_path="${path_mappings[$local_path]}"
+              
+              # Get changes from main folder (excluding overrides)
+              git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{github.sha}} -- "$local_path" > ~/main_changes.tmp
+              
+              # Filter out overrides
+              if [ -s ~/override_changes ]; then
+                grep -vFf <(sed "s|^${{inputs.override-path}}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
+              else
+                cp ~/main_changes.tmp ~/filtered_changes.tmp
+              fi
+
+              # Convert to mapping format
+              awk -v local="$local_path" -v remote="$remote_path" '
+                {
+                  gsub("^" local "/?", "")
+                  if ($0 != "") {
+                    print local "|" $0 " -> " remote "/" $0
+                  }
+                }' ~/filtered_changes.tmp >> ~/files_to_upload
+
+              # Process deletions
+              git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{github.sha}} -- "$local_path" > ~/deletions.tmp
+              awk -v remote="$remote_path" '{print remote "/" $0}' ~/deletions.tmp >> ~/files_to_delete
+
+              rm ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
+            done
+
+            # Add override changes
+            if [ -s ~/override_changes ]; then
+              while read -r override_file; do
+                rel_path="${override_file#${{inputs.override-path}}/}"
+                for local_path in "${!path_mappings[@]}"; do
+                  if [[ "$rel_path" == "$local_path"* ]]; then
+                    remote_path="${path_mappings[$local_path]}"
+                    echo "${{inputs.override-path}}|$rel_path -> $remote_path/${rel_path#$local_path/}" >> ~/files_to_upload
+                    break
+                  fi
+                done
+              done < ~/override_changes
+            fi
+          fi
         fi
 
         # Debug output
         if [ "${{inputs.debug}}" == "true" ]; then
-            echo "Path mappings:"
-            for local in "${!path_mappings[@]}"; do
-                echo "  $local -> ${path_mappings[$local]}"
-            done
-            show_hr
-        fi
-
-        input_remote_password="${{inputs.remote-password}}"
-        if [ "${{inputs.remote-password}}" == "" ]; then
-          input_remote_password="dummypassword"
-        fi
-
-        input_proxy="${{inputs.proxy}}"
-
-        proxy_cmd=""
-        if [ "${input_proxy}" == "true" ]; then
-          proxy_cmd="proxychains"
-        fi
-
-        input_sync=${{inputs.sync}}
-        if [ "${{github.event_name}}" == "workflow_dispatch" ] && [ -n "${{github.event.inputs.sync}}" ]; then
-          input_sync=${{github.event.inputs.sync}}
-        fi
-
-        echo "Validate inputs"
-
-        if [ "${{inputs.remote-protocol}}" != "sftp" ] && [ "${{inputs.remote-protocol}}" != "ftp" ]; then
-          echo "::error::Invalid protocol: ${{inputs.remote-protocol}}. Valid protocols are 'ftp' and 'sftp'."
-          exit 1
-        fi
-
-        if [ "${input_sync}" != "delta" ] && [ "${input_sync}" != "full" ]; then
-          echo "::error::Invalid synchronization: ${input_sync}. Valid types are 'delta' and 'full'."
-          exit 1
-        fi
-
-        echo "::endgroup::"
-
-        if [ "${{inputs.debug}}" == "true" ]; then
-          echo "::group::Debug"
-
-          echo "Context: github.event" && cat ${{github.event_path}} && show_hr
-
-          echo "Context: env" && echo "${{toJSON(env)}}" && show_hr
-
-          echo "Inputs:" && echo "${{toJSON(inputs)}}"
-
-          echo "Path mappings:"
-          for local in "${!path_mappings[@]}"; do
-              echo "  $local -> ${path_mappings[$local]}"
-          done
-
+          echo "::group::File Changes"
+          echo "Files to upload:"
+          [ -s ~/files_to_upload ] && cat ~/files_to_upload || echo "None"
+          show_hr
+          echo "Files to delete:"
+          [ -s ~/files_to_delete ] && cat ~/files_to_delete || echo "None"
+          show_hr
+          echo "Override changes:"
+          [ -s ~/override_changes ] && cat ~/override_changes || echo "None"
           echo "::endgroup::"
         fi
-
-        echo "::group::Install packages"
-
-        apt_install=""
-        apt_quiet="--quiet --quiet"
-        if [ "${{inputs.debug}}" == "true" ]; then
-          apt_quiet=""
-        fi
-
-        sudo apt-get ${apt_quiet} update && sudo apt-get ${apt_quiet} --no-install-recommends --yes install lftp ${proxy_cmd}
-
         echo "::endgroup::"
 
-        echo "::group::Configurations"
-
-        config_ssh=~/.ssh/config
-        mkdir ~/.ssh && echo -e "ExitOnForwardFailure=yes\nStrictHostKeyChecking=no" > ${config_ssh} && chmod 600 ${config_ssh} && echo "File created: ${config_ssh}"
-        [ "${{inputs.debug}}" == "true" ] && cat ${config_ssh}
-        show_hr
-
-        netrc=~/.netrc
-        echo "machine ${{inputs.remote-host}} login ${{inputs.remote-user}} password ${input_remote_password}" > ${netrc} && chmod 600 ${netrc} && echo "File created: ${netrc}"
-        [ "${{inputs.debug}}" == "true" ] && cat ${netrc}
-        show_hr
-
-        if [ "${{inputs.remote-protocol}}" == "sftp" ] && [ "${{inputs.ssh-private-key}}" != "" ]; then
-          key_ssh=~/ssh_private_key
-          echo "${{inputs.ssh-private-key}}" > ${key_ssh} && chmod 600 ${key_ssh} && echo "File created: ${key_ssh}" && show_hr
-        fi
-
-        if [ "${input_proxy}" == "true" ]; then
-          if [ "${{inputs.proxy-private-key}}" != "" ]; then
-            key_proxy=~/proxy_private_key
-            echo "${{inputs.proxy-private-key}}" > ${key_proxy} && chmod 600 ${key_proxy} && echo "File created: ${key_proxy}" && show_hr
-
-            config_proxychains=~/.proxychains/proxychains.conf
-            mkdir ~/.proxychains && echo "strict_chain
-            quiet_mode
-            tcp_read_time_out 15000
-            tcp_connect_time_out 10000
-            [ProxyList]
-            socks5 127.0.0.1 ${{inputs.proxy-forwarding-port}}" > ${config_proxychains} && echo "File created: ${config_proxychains}"
-            [ "${{inputs.debug}}" == "true" ] && cat ${config_proxychains}
-            show_hr
-          else
-            input_proxy="false"
-            echo "::warning::Invalid input 'proxy-private-key'. Skipping proxy connection."
-          fi
-        fi
-
-        echo "debug $([ "${{inputs.debug}}" == "true" ] && echo "9" || echo "false")
-        set cmd:trace $([ "${{inputs.debug}}" == "true" ] && echo "true" || echo "false")
-        set ftp:ssl-protect-data true
-        set ftp:sync-mode false
-        set log:enabled/xfer true
-        set log:file/xfer ~/transfer_log.txt
-        set log:show-time/xfer false
-        set mirror:overwrite true
-        set mirror:parallel-transfer-count 3
-        set mirror:set-permissions false
-        set net:max-retries 1
-        set net:persist-retries 0
-        set net:timeout 10
-        set sftp:auto-confirm true
-        set ssl:check-hostname false
-        set ssl:verify-certificate false
-        set xfer:parallel 3
-        ${{inputs.ftp-options}}" > ~/.lftprc
-        if [ "${{inputs.remote-protocol}}" == "sftp" ] && [ "${{inputs.ssh-private-key}}" != "" ]; then
-          echo "set sftp:connect-program /usr/bin/ssh -a -x -i ~/ssh_private_key ${{inputs.ssh-options}}" >> ~/.lftprc
-        else
-          echo "set sftp:connect-program /usr/bin/ssh -a -x ${{inputs.ssh-options}}" >> ~/.lftprc
-        fi
-        echo "open ${{inputs.remote-protocol}}://${{inputs.remote-user}}@${{inputs.remote-host}}:${{inputs.remote-port}}" >> ~/.lftprc
-        echo "File created: ~/.lftprc"
-        [ "${{inputs.debug}}" == "true" ] && cat ~/.lftprc
-
-        echo "::endgroup::"
-
-        if [ "${input_proxy}" == "true" ]; then
-          echo "::group::Setup proxy"
-
-          if [ "${{inputs.proxy-user}}" != "" ] && [ "${{inputs.proxy-host}}" != "" ]; then
-            if ssh -A -D ${{inputs.proxy-forwarding-port}} -f -N -p ${{inputs.proxy-port}} -i ~/proxy_private_key ${{inputs.proxy-user}}@${{inputs.proxy-host}}; then
-              echo "Proxy connected" && show_hr && echo "Proxy IP address: $(${proxy_cmd} curl --max-time 10 --show-error --silent "http://checkip.amazonaws.com/")"
-            else
-              echo "::error::Proxy connection failed."
-              exit 1
-            fi
-          else
-            input_proxy="false"
-            echo "::warning::Invalid input 'proxy-user', 'proxy-host'. Skipping proxy connection."
-          fi
-
-          echo "::endgroup::"
-        fi
-
-        echo "::group::Prepare files"
-
-        echo "Event: ${{github.event_name}}
-        Revision: https://github.com/${{github.repository}}/commit/${{github.sha}}
-        Committer: ${{github.actor}}
-        Message: ${{github.event.head_commit.message}}" && show_hr
-
-        if [ "${input_sync}" == "delta" ]; then
-            touch ~/files_to_upload ~/files_to_delete ~/files_to_ignore
-            git_depth=$(git rev-list --count --all)
-            git_previous_commit=""
-
-            if [ "${git_depth}" -gt 1 ]; then
-                if [ "${{github.event_name}}" == "push" ]; then
-                    git_previous_commit=${{github.event.before}}
-                elif [ "${{github.event_name}}" == "pull_request" ]; then
-                    git_previous_commit=${{github.event.pull_request.base.sha}}
-                elif [ "${{github.event_name}}" == "workflow_dispatch" ]; then
-                    git_previous_commit=$(git rev-parse ${{github.sha}}^)
-                else
-                    echo "::error::Event not supported for delta synchronization: ${{github.event_name}}. Supported events are 'push', 'pull_request' and 'workflow_dispatch'."
-                    exit 1
-                fi
-            fi
-
-            if git cat-file -t ${git_previous_commit} &>/dev/null; then
-                # Process exclusions - create ignore list
-                if [ -n "${{inputs.sync-delta-excludes}}" ]; then
-                    echo "Processing exclusions..."
-                    # Clean up the input - remove empty lines and trim whitespace
-                    echo "${{inputs.sync-delta-excludes}}" | sed '/^$/d' | while read -r pattern; do
-                        pattern=$(echo "$pattern" | xargs)  # Trim whitespace
-                        for local_path in "${!path_mappings[@]}"; do
-                            # Use find to locate matching files, handling the pattern properly
-                            if [ -d "${local_path}" ]; then
-                                find "${local_path}" -name "${pattern}" -type f | while read -r full_path; do
-                                    relative_path="${full_path#$local_path/}"
-                                    echo "${local_path}|${relative_path}" >> ~/files_to_ignore
-                                done
-                            fi
-                        done
-                    done
-                fi
-
-                # Get ALL changed files first (without exclusions)
-                for local_path in "${!path_mappings[@]}"; do
-                    remote_path="${path_mappings[$local_path]}"
-                    
-                    # Get all changed files
-                    git diff --diff-filter=ACMRT --name-only ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' > ~/all_changed_files.tmp
-                    git diff-tree --diff-filter=D --name-only -t ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' > ~/all_deleted_files.tmp
-
-                    # Apply exclusions if any
-                    if [ -s ~/files_to_ignore ]; then
-                        # Create pattern file for filtering
-                        cut -d'|' -f2 ~/files_to_ignore > ~/ignore_patterns.tmp
-                        
-                        # Filter changed files (only keep lines not matching any pattern)
-                        grep -vFf ~/ignore_patterns.tmp ~/all_changed_files.tmp > ~/files_to_upload.tmp || true
-                        grep -vFf ~/ignore_patterns.tmp ~/all_deleted_files.tmp > ~/files_to_delete.tmp || true
-                        
-                        rm ~/ignore_patterns.tmp
-                    else
-                        cp ~/all_changed_files.tmp ~/files_to_upload.tmp
-                        cp ~/all_deleted_files.tmp ~/files_to_delete.tmp
-                    fi
-                    
-                    # Convert to mapping format
-                    awk -v local="$local_path" -v remote="$remote_path" '
-                        {
-                            gsub("^" local "/?", "")
-                            if ($0 != "") {
-                                print local "|" $0 " -> " remote "/" $0
-                            }
-                        }' ~/files_to_upload.tmp >> ~/files_to_upload
-                        
-                    awk -v local="$local_path" -v remote="$remote_path" '
-                        {
-                            gsub("^" local "/?", "")
-                            if ($0 != "") {
-                                print remote "/" $0
-                            }
-                        }' ~/files_to_delete.tmp >> ~/files_to_delete
-                    
-                    # Clean up temp files
-                    rm -f ~/all_changed_files.tmp ~/all_deleted_files.tmp ~/files_to_upload.tmp ~/files_to_delete.tmp
-                done
-
-                # Debug output
-                if [ "${{inputs.debug}}" == "true" ]; then
-                    echo "::group::Delta Sync File Lists"
-                    echo "Files to upload:"
-                    [ -s ~/files_to_upload ] && cat ~/files_to_upload || echo "None"
-                    show_hr
-                    
-                    echo "Files to delete:"
-                    [ -s ~/files_to_delete ] && cat ~/files_to_delete || echo "None"
-                    show_hr
-                    
-                    echo "Files being ignored:"
-                    if [ -s ~/files_to_ignore ]; then
-                        while IFS="|" read -r local_path relative_path; do
-                            echo "${local_path}/${relative_path}"
-                        done < ~/files_to_ignore
-                    else
-                        echo "None"
-                    fi
-                    echo "::endgroup::"
-                fi
-            else
-                echo "::warning::Invalid base commit for delta synchronization: ${git_previous_commit}"
-            fi
-        fi
-
-        echo "::endgroup::"
-
+        # File transfer
         echo "::group::Transfer files"
+        function process_upload() {
+          local src="$1"
+          local dest="$2"
+          local flatten="$3"
 
-        if [ "${input_sync}" == "full" ]; then
-            for local_path in "${!path_mappings[@]}"; do
-                remote_path="${path_mappings[$local_path]}"
-                echo "Syncing $local_path -> $remote_path"
-                ${proxy_cmd} lftp -c "mirror --exclude-glob=.git*/ --max-errors=10 --reverse ${{inputs.ftp-mirror-options}} ${local_path} ${remote_path}; ${{inputs.ftp-post-sync-commands}}"
-            done
-        else
-            # Process uploads
-            while read -r line; do
-                local_mapping=$(echo "$line" | awk -F' -> ' '{print $1}')
-                remote_mapping=$(echo "$line" | awk -F' -> ' '{print $2}')
-                
-                local_path=$(echo "$local_mapping" | cut -d'|' -f1)
-                relative_path=$(echo "$local_mapping" | cut -d'|' -f2)
-                full_local_path="${local_path}/${relative_path}"
-                remote_dir=$(dirname "$remote_mapping")
-                remote_filename=$(basename "$remote_mapping")
-                
-                echo "Uploading $full_local_path to $remote_mapping"
-                ${proxy_cmd} lftp -c "put -O \"$remote_dir\" \"$full_local_path\" -o \"$remote_filename\""
-            done < ~/files_to_upload
-            
-            # Process deletes - handle empty file case
-            if [ -s ~/files_to_delete ]; then
-                ${proxy_cmd} lftp -c "$(awk '{printf "rm -f \"%s\"; ", $0}' ~/files_to_delete) ${{inputs.ftp-post-sync-commands}}"
-            else
-                ${proxy_cmd} lftp -c "${{inputs.ftp-post-sync-commands}}"
+          if [ "$flatten" -eq 1 ]; then
+            remote_file="$(basename "$src")"
+            echo "FLAT: $src → $dest/$remote_file"
+            ${proxy_cmd} lftp -c "put -O \"$dest\" \"$src\" -o \"$remote_file\""
+          else
+            relative_path="${src#$local_path/}"
+            echo "NORMAL: $src → $dest/$relative_path"
+            ${proxy_cmd} lftp -c "put -O \"$dest/$(dirname "$relative_path")\" \"$src\" -o \"$(basename "$relative_path")\""
+          fi
+        }
+
+        # Process uploads
+        while read -r line; do
+          src_mapping=$(echo "$line" | awk -F' -> ' '{print $1}')
+          dest_path=$(echo "$line" | awk -F' -> ' '{print $2}')
+          
+          src_path=$(echo "$src_mapping" | cut -d'|' -f1)
+          relative_path=$(echo "$src_mapping" | cut -d'|' -f2)
+          dest_root=$(dirname "$dest_path")
+
+          # Find matching mapping
+          for local_path in "${!path_mappings[@]}"; do
+            if [[ "$src_path/$relative_path" == "$local_path"* ]]; then
+              process_upload "$src_path/$relative_path" "${path_mappings[$local_path]}" "${flatten_flags[$local_path]}"
+              break
             fi
+          done
+        done < ~/files_to_upload
+
+        # Process deletions
+        if [ -s ~/files_to_delete ]; then
+          echo "Deleting files:"
+          ${proxy_cmd} lftp -c "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); ${{inputs.ftp-post-sync-commands}}"
         fi
-
-        [ -f ~/transfer_log.txt ] && cat ~/transfer_log.txt
         echo "::endgroup::"
-        
 
+        # Cleanup
         echo "::group::Cleanup"
-        
-        [ "${input_proxy}" == "true" ] && sudo pkill ssh
-
-        rm --force --verbose ~/.netrc ~/proxy_private_key ~/ssh_private_key
-        
-        [ "${{inputs.artifacts}}" != "true" ] && rm --force --verbose ~/transfer_log.txt
-        
-        [ "${{inputs.webhook}}" != "" ] && echo "Webhook notification (finish): $(send_webhook "finish")"
-
+        [ "${{inputs.proxy}}" == "true" ] && pkill ssh || true
+        rm -f ~/.netrc ~/ssh_private_key ~/proxy_private_key
+        [ -n "${{inputs.webhook}}" ] && send_webhook "complete"
         echo "::endgroup::"
 
         exit 0
     - name: "Upload artifacts"
+      if: ${{ inputs.artifacts == 'true' }}
       uses: actions/upload-artifact@v4
       with:
-        name: "transfer_artifacts"
+        name: "deployment-logs"
         path: |
+          ~/files_to_upload
+          ~/files_to_delete
           ~/transfer_log.txt
-          ~/transfer_files
         if-no-files-found: ignore
