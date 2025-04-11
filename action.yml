@@ -205,36 +205,47 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer
+        # File transfer section with proper escaping (8 spaces for YAML)
         echo "::group::Transfer files"
         function process_upload() {
             local src="$1"
             local dest="$2"
             
-            echo "UPLOAD: $src → $dest"
+            # Clean destination path and ensure proper escaping
+            clean_dest=$(echo "$dest" | sed 's/[<>|&]/\\&/g')
+            clean_src=$(echo "$GITHUB_WORKSPACE/$src" | sed 's/[<>|&]/\\&/g')
+            
+            echo "UPLOAD: $src → $clean_dest"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
                 -p "${{ inputs.remote-port }}" \
-                -e "set cmd:fail-exit true; mkdir -p '$(dirname "$dest")'; put '$GITHUB_WORKSPACE/$src' -o '$dest'; quit" \
+                -e "set cmd:fail-exit true; \
+                    mkdir -p '$(dirname "$clean_dest" | sed \"s/'/\\\\'/g\")'; \
+                    put '$(echo "$clean_src" | sed \"s/'/\\\\'/g\")' -o '$(echo "$clean_dest" | sed \"s/'/\\\\'/g\")'; \
+                    quit" \
                 "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
         }
 
+        # Process uploads (8 spaces for YAML)
         if [ -s ~/files_to_upload ]; then
-            # Clean and deduplicate the file list
-            awk '!seen[$0]++' ~/files_to_upload > ~/files_to_upload_dedup
-            mv ~/files_to_upload_dedup ~/files_to_upload
+            # Proper deduplication that maintains order
+            awk '!x[$0]++' ~/files_to_upload > ~/files_to_upload.tmp
+            mv ~/files_to_upload.tmp ~/files_to_upload
             
             while IFS=" -> " read -r src dest; do
-                if [ -f "$GITHUB_WORKSPACE/$src" ]; then
-                    # Ensure destination path is clean
-                    clean_dest=$(echo "$dest" | sed 's/> //g')
-                    process_upload "$src" "$clean_dest"
+                # Remove any malformed characters from paths
+                clean_src=$(echo "$src" | tr -d '|>')
+                clean_dest=$(echo "$dest" | tr -d '|>')
+                
+                if [ -f "$GITHUB_WORKSPACE/$clean_src" ]; then
+                    process_upload "$clean_src" "$clean_dest"
                 else
-                    echo "::warning::File not found: $src"
+                    echo "::warning::File not found: $clean_src"
                 fi
             done < ~/files_to_upload
         else
             echo "No files to upload"
         fi
+        echo "::endgroup::"
 
         # Process deletions
         if [ -s ~/files_to_delete ]; then
