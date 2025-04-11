@@ -194,38 +194,39 @@ runs:
 
             # Process each path mapping
             for local_path in "${!path_mappings[@]}"; do
-              remote_path="${path_mappings[$local_path]}"
-              
-              # Get changes from main folder (excluding overrides)
-              git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
-              
-              # Filter out overrides
-              if [ -s ~/override_changes ]; then
-                grep -vFf <(sed "s|^${{ inputs.override-path }}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
-              else
-                cp ~/main_changes.tmp ~/filtered_changes.tmp
-              fi
+                remote_path="${path_mappings[$local_path]}"
+                
+                # Get changes from main folder (excluding overrides)
+                git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
+                
+                # Filter out overrides
+                if [ -s ~/override_changes ]; then
+                    grep -vFf <(sed "s|^${{ inputs.override-path }}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
+                else
+                    cp ~/main_changes.tmp ~/filtered_changes.tmp
+                fi
 
-              # Convert to mapping format
-              awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
-                {
-                  gsub("^" local "/?", "")
-                  if ($0 != "") {
-                    if (flat == 1) {
-                      # For flat mappings, just use the filename
-                      print local "|" $0 " -> " remote "/" $(split($0,parts,"/"); parts[length(parts)]}'
-                    } else {
-                      # For normal mappings, keep the full path
-                      print local "|" $0 " -> " remote "/" $0
-                    }
-                  }
-                }' ~/filtered_changes.tmp >> ~/files_to_upload
+                # Convert to mapping format
+                awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
+                    {
+                        gsub("^" local "/?", "")
+                        if ($0 != "") {
+                            if (flat == 1) {
+                                # For flat mappings, just use the filename
+                                split($0,parts,"/")
+                                print local "|" $0 " -> " remote "/" parts[length(parts)]
+                            } else {
+                                # For normal mappings, keep the full path
+                                print local "|" $0 " -> " remote "/" $0
+                            }
+                        }
+                    }' ~/filtered_changes.tmp >> ~/files_to_upload
 
-              # Process deletions
-              git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
-              awk -v remote="$remote_path" '{print remote "/" $0}' ~/deletions.tmp >> ~/files_to_delete
+                # Process deletions
+                git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
+                awk -v remote="$remote_path" '{print remote "/" $0}' ~/deletions.tmp >> ~/files_to_delete
 
-              rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
+                rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
             done
 
             # Add override changes
