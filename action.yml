@@ -161,7 +161,7 @@ runs:
         chmod 600 ~/.ssh/config
 
         # Create lftp config
-        cat > ~/.lftprc <<EOF
+        cat > ~/.lftprc << 'EOF'
         set ftp:ssl-protect-data true
         set net:timeout 10
         set xfer:parallel 3
@@ -273,12 +273,12 @@ runs:
           fi
         }
 
-        # Set proxy command if needed
+        # Set proxy command if needed - FIXED EOF HANDLING
         if [ "${{ inputs.proxy }}" == "true" ]; then
           proxy_cmd="proxychains -q"
           if [ -n "${{ inputs.proxy-host }}" ]; then
             # Create custom proxychains config
-            cat > /tmp/proxychains.conf <<EOF
+            cat > /tmp/proxychains.conf << 'EOF'
             strict_chain
             proxy_dns
             [ProxyList]
