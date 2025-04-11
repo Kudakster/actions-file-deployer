@@ -124,6 +124,8 @@ runs:
 
         echo "Initialize inputs"
 
+        echo "Initialize paths mapping"
+
         # Parse paths JSON into associative array
         declare -A path_mappings
         while IFS="=" read -r local_path remote_path; do
@@ -131,7 +133,19 @@ runs:
             local_path_clean=$(echo "$local_path" | sed 's:/*$::')
             remote_path_clean=$(echo "$remote_path" | sed 's:/*$::')
             path_mappings["$local_path_clean"]="$remote_path_clean"
-        done < <(jq -r "to_entries|map(\"\(.key)=\(.value|tostring)\")|.[]" <<< "${{inputs.paths}}")
+            if [ "${{inputs.debug}}" == "true" ]; then
+                echo "  Mapping: '$local_path_clean' -> '$remote_path_clean'"
+            fi
+        done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "${{inputs.paths}}")
+
+        # Debug output
+        if [ "${{inputs.debug}}" == "true" ]; then
+            echo "Path mappings:"
+            for local in "${!path_mappings[@]}"; do
+                echo "  $local -> ${path_mappings[$local]}"
+            done
+            show_hr
+        fi
 
         input_remote_password="${{inputs.remote-password}}"
         if [ "${{inputs.remote-password}}" == "" ]; then
@@ -302,6 +316,8 @@ runs:
                 fi
             fi
 
+            echo "${{git_previous_commit}}"
+            
             if git cat-file -t ${git_previous_commit} &>/dev/null; then
                 # Process each path mapping separately
                 exclude_args=""
