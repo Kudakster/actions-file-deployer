@@ -237,15 +237,24 @@ runs:
           while IFS=" -> " read -r src dest; do
             local_path="${src%|*}"
             src_file="${src#*|}"
-            # Construct full source path correctly
-            if [[ "$local_path" == *"modified"* ]] || [[ "$local_path" == *"rmplugins"* ]] || [[ "$local_path" == *"szplugins"* ]]; then
-              full_src_path="$local_path/$src_file"
+            
+            # Construct proper source path (always use full path)
+            full_src_path="$local_path/$src_file"
+            
+            # For flat mappings, destination is just the base remote path + filename
+            if [ "${flatten_flags[$local_path]}" -eq 1 ]; then
+              dest_path="$dest/$(basename "$src_file")"
             else
-              full_src_path="$local_path/$src_file"
+              dest_path="$dest/$src_file"
             fi
-            # Verify file exists before uploading
+            
+            # Verify file exists
             if [ -f "$GITHUB_WORKSPACE/$full_src_path" ]; then
-              process_upload "$full_src_path" "$dest" "${flatten_flags[$local_path]}"
+              echo "UPLOAD: $full_src_path → $dest_path"
+              lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
+                -p "${{ inputs.remote-port }}" \
+                -e "set cmd:fail-exit true; mkdir -p '$(dirname "$dest_path")'; put '$GITHUB_WORKSPACE/$full_src_path' -o '$dest_path'; quit" \
+                "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
             else
               echo "::warning::File not found: $full_src_path"
             fi
