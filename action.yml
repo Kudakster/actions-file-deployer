@@ -381,22 +381,31 @@ runs:
                 ${proxy_cmd} lftp -c "put -O \"$(dirname "$full_remote_path")\" \"${full_local_path}\""
             done < <(awk -F' -> ' '{print $1 " " $2}' ~/files_to_upload)
             
-            # Process deletes
-            ${proxy_cmd} lftp -c "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); ${{inputs.ftp-post-sync-commands}}"
+            # Process deletes - handle empty file case
+            if [ -s ~/files_to_delete ]; then
+                # Create a temporary script to handle deletions in batches
+                echo "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete)" > ~/delete_script.lftp
+                echo "${{inputs.ftp-post-sync-commands}}" >> ~/delete_script.lftp
+                ${proxy_cmd} lftp -f ~/delete_script.lftp
+                rm ~/delete_script.lftp
+            else
+                ${proxy_cmd} lftp -c "${{inputs.ftp-post-sync-commands}}"
+            fi
         fi
 
         [ -f ~/transfer_log.txt ] && cat ~/transfer_log.txt
 
         echo "::endgroup::"
+        
 
         echo "::group::Cleanup"
-
+        
         [ "${input_proxy}" == "true" ] && sudo pkill ssh
 
         rm --force --verbose ~/.netrc ~/proxy_private_key ~/ssh_private_key
-
+        
         [ "${{inputs.artifacts}}" != "true" ] && rm --force --verbose ~/transfer_log.txt
-
+        
         [ "${{inputs.webhook}}" != "" ] && echo "Webhook notification (finish): $(send_webhook "finish")"
 
         echo "::endgroup::"
