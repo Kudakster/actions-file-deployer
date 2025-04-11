@@ -208,18 +208,18 @@ runs:
 
               # Convert to mapping format
               awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
-          {
-            gsub("^" local "/?", "")
-            if ($0 != "") {
-              if (flat == 1) {
-                # For flat mappings, just use the filename
-                print local "|" $0 " -> " remote "/" $(split($0,parts,"/"); parts[length(parts)]}'
-              } else {
-                # For normal mappings, keep the full path
-                print local "|" $0 " -> " remote "/" $0
-              }
-            }
-          }' ~/filtered_changes.tmp >> ~/files_to_upload
+                {
+                  gsub("^" local "/?", "")
+                  if ($0 != "") {
+                    if (flat == 1) {
+                      # For flat mappings, just use the filename
+                      print local "|" $0 " -> " remote "/" $(split($0,parts,"/"); parts[length(parts)]}'
+                    } else {
+                      # For normal mappings, keep the full path
+                      print local "|" $0 " -> " remote "/" $0
+                    }
+                  }
+                }' ~/filtered_changes.tmp >> ~/files_to_upload
 
               # Process deletions
               git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
