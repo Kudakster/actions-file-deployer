@@ -144,19 +144,16 @@ runs:
 
               # Convert to mapping format with proper flat handling
               awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
-               {
-                  gsub("^" local "/?", "")
-                  if ($0 != "") {
-                    if (flat == 1) {
-                        split($0, parts, "/")
-                        # Only process if this is the deepest mapping
-                        if (!(local ~ /\/[^\/]+$/ && $0 ~ /^[^\/]+$/)) {
-                            print local "/" $0 " -> " remote "/" parts[length(parts)]
-                        }
-                    } else {
-                        print local "/" $0 " -> " remote "/" $0
+                {
+                    gsub("^" local "/?", "")
+                    if ($0 != "") {
+                      if (flat == 1) {
+                          split($0, parts, "/")
+                          print local "/" $0 "\t" remote "/" parts[length(parts)]
+                      } else if (!match($0, /^(modified|rmplugins|szplugins)\//)) {
+                          print local "/" $0 "\t" remote "/" $0
+                      }
                     }
-                  }
                 }' ~/filtered_changes.tmp >> ~/files_to_upload
 
               # Process deletions
@@ -208,43 +205,38 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer with robust path cleaning (8-space YAML indentation)
+        # Transfer files with robust command formatting (8-space YAML indent)
         echo "::group::Transfer files"
-        function clean_path() {
-            echo "$1" | sed -e 's/[<>|]//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
-        }
-
         function process_upload() {
-            local src=$(clean_path "$1")
-            local dest=$(clean_path "$2")
-            local abs_src="$GITHUB_WORKSPACE/$src"
+            local src="$1"
+            local dest="$2"
+            
+            # Secure command construction
+            lftp_cmd=$(printf "set cmd:fail-exit true
+                mkdir -p '%s'
+                put '%s' -o '%s'
+                quit" \
+                "${dest%/*}" \
+                "$GITHUB_WORKSPACE/$src" \
+                "$dest")
             
             echo "UPLOAD: $src → $dest"
             lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
                 -p "${{ inputs.remote-port }}" \
-                -e "set cmd:fail-exit true; \
-                    mkdir -p '${dest%/*}'; \
-                    put '$abs_src' -o '$dest'; \
-                    quit" \
+                -e "$lftp_cmd" \
                 "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
         }
 
-        # Process uploads with proper cleaning (8-space YAML indentation)
+        # Process uploads with proper priority (8-space YAML indent)
         if [ -s ~/files_to_upload ]; then
-            # Clean the file first
-            sed -i 's/[<>|]//g' ~/files_to_upload
-            
-            # Process each file
-            while IFS="->" read -r src dest; do
-                src=$(clean_path "$src")
-                dest=$(clean_path "$dest")
-                
+            # Use tab separator and sort by path depth (flattened first)
+            sort -t$'\t' -k2,2 -u ~/files_to_upload | while IFS=$'\t' read -r src dest; do
                 if [ -f "$GITHUB_WORKSPACE/$src" ]; then
                     process_upload "$src" "$dest"
                 else
                     echo "::warning::File not found: $src"
                 fi
-            done < ~/files_to_upload
+            done
         else
             echo "No files to upload"
         fi
