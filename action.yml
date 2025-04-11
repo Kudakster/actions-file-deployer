@@ -243,9 +243,9 @@ runs:
             
             # For flat mappings, destination is just the base remote path + filename
             if [ "${flatten_flags[$local_path]}" -eq 1 ]; then
-              dest_path="$dest/$(basename "$src_file")"
+              dest_path="$dest"
             else
-              dest_path="$dest/$src_file"
+              dest_path="$dest"
             fi
             
             # Verify file exists
