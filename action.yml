@@ -328,21 +328,22 @@ runs:
                     exit 1
                 fi
             fi
-            
+
             if git cat-file -t ${git_previous_commit} &>/dev/null; then
-                # Process each path mapping separately
+                # Convert excludes to proper git format
                 exclude_args=""
                 if [ -n "${{inputs.sync-delta-excludes}}" ]; then
-                    # Handle both space-separated and newline-separated lists
-                    exclude_args=$(echo "${{inputs.sync-delta-excludes}}" | tr '\n' ' ' | xargs -n1 printf ":!%s ")
+                    # Convert newlines to spaces and add :! prefix for each pattern
+                    exclude_args=$(echo "${{inputs.sync-delta-excludes}}" | sed 's/^/:!/;s/^/ /' | tr '\n' ' ')
+                    echo "Excluding patterns: ${exclude_args}"
                 fi
 
                 for local_path in "${!path_mappings[@]}"; do
                     remote_path="${path_mappings[$local_path]}"
                     
-                    # Get changed files for this mapping
-                    git diff --diff-filter=ACMRT --name-only ${git_previous_commit}..${{github.sha}} -- "$local_path" ':!/.git*' ${exclude_args} >> ~/files_to_upload.tmp
-                    git diff-tree --diff-filter=D --name-only -t ${git_previous_commit}..${{github.sha}} -- "$local_path" ':!/.git*' ${exclude_args} >> ~/files_to_delete.tmp
+                    # Get changed files for this mapping, applying excludes
+                    git diff --diff-filter=ACMRT --name-only ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' ${exclude_args} > ~/files_to_upload.tmp
+                    git diff-tree --diff-filter=D --name-only -t ${git_previous_commit}..${{github.sha}} -- "${local_path}" ':!/.git*' ${exclude_args} > ~/files_to_delete.tmp
                     
                     # Convert to relative paths and add remote path prefix
                     awk -v local="$local_path" -v remote="$remote_path" '
@@ -364,23 +365,13 @@ runs:
                                 print remote "/" $0
                             }
                         }' ~/files_to_delete.tmp >> ~/files_to_delete
-                        
+                    
                     rm ~/files_to_upload.tmp ~/files_to_delete.tmp
                 done
 
                 # Debug output
                 [ "${{inputs.debug}}" == "true" ] && (echo "Files to upload:" && cat ~/files_to_upload && show_hr)
                 [ "${{inputs.debug}}" == "true" ] && (echo "Files to delete:" && cat ~/files_to_delete && show_hr)
-
-                if [ "${{inputs.artifacts}}" == "true" ]; then
-                    echo "Copy transfer artifacts" && mkdir -p ~/transfer_files
-                    while IFS="->" read -r local_mapping remote_mapping; do
-                        local_path=$(echo "$local_mapping" | cut -d'|' -f1)
-                        relative_path=$(echo "$local_mapping" | cut -d'|' -f2)
-                        mkdir -p ~/transfer_files/$(dirname "$local_path/$relative_path")
-                        cp "$local_path/$relative_path" ~/transfer_files/"$local_path/$relative_path"
-                    done < <(awk -F' -> ' '{print $1 " " $2}' ~/files_to_upload)
-                fi
             else
                 echo "::warning::Invalid base commit for delta synchronization: ${git_previous_commit}. Please ignore if this is an initial commit or newly created branch."
             fi
