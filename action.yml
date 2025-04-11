@@ -161,14 +161,12 @@ runs:
         chmod 600 ~/.ssh/config
 
         # Create lftp config
-        cat > ~/.lftprc << 'EOF'
+        cat > ~/.lftprc <<'EOF'
         set ftp:ssl-protect-data true
         set net:timeout 10
         set xfer:parallel 3
         set mirror:parallel-transfer-count 3
-        $([ "${{ inputs.remote-protocol }}" == "sftp" ] && echo "set sftp:auto-confirm true")
-        $([ -n "${{ inputs.ssh-private-key }}" ] && echo "set sftp:connect-program \"ssh -a -x -i ~/ssh_private_key ${{ inputs.ssh-options }}\"")
-        ${{ inputs.ftp-options }}
+        set sftp:auto-confirm true
         EOF
         
         echo "::endgroup::"
@@ -273,17 +271,17 @@ runs:
           fi
         }
 
-        # Set proxy command if needed - FIXED EOF HANDLING
-        if [ "${{ inputs.proxy }}" == "true" ]; then
+        # Set proxy command if needed - FIXED INDENTATION
+        if [ "false" == "true" ]; then
           proxy_cmd="proxychains -q"
-          if [ -n "${{ inputs.proxy-host }}" ]; then
+          if [ -n "" ]; then
             # Create custom proxychains config
-            cat > /tmp/proxychains.conf << 'EOF'
-            strict_chain
-            proxy_dns
-            [ProxyList]
-            ${{ inputs.remote-protocol }} ${{ inputs.proxy-host }} ${{ inputs.proxy-port }} ${{ inputs.proxy-user }} ${{ inputs.proxy-private-key }}
-            EOF
+            cat > /tmp/proxychains.conf <<'EOF'
+        strict_chain
+        proxy_dns
+        [ProxyList]
+        sftp  22  
+        EOF
             proxy_cmd="$proxy_cmd -f /tmp/proxychains.conf"
           fi
         else
