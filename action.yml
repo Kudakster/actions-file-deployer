@@ -126,6 +126,12 @@ runs:
 
         echo "Initialize paths mapping"
 
+        # Clean and validate the JSON input
+        paths_json=$(echo "${{inputs.paths}}" | sed 's/^ *//;s/ *$//')
+        if [[ ! "$paths_json" =~ ^\{.*\}$ ]]; then
+            paths_json="{$paths_json}"
+        fi
+
         # Parse paths JSON into associative array
         declare -A path_mappings
         while IFS="=" read -r local_path remote_path; do
@@ -136,7 +142,14 @@ runs:
             if [ "${{inputs.debug}}" == "true" ]; then
                 echo "  Mapping: '$local_path_clean' -> '$remote_path_clean'"
             fi
-        done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "${{inputs.paths}}")
+        done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$paths_json" 2>/dev/null)
+
+        if [ ${#path_mappings[@]} -eq 0 ]; then
+            echo "::error::Failed to parse paths input. Please check the format."
+            echo "Received paths input: '${{inputs.paths}}'"
+            echo "Attempted to parse as: '$paths_json'"
+            exit 1
+        fi
 
         # Debug output
         if [ "${{inputs.debug}}" == "true" ]; then
