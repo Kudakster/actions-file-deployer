@@ -205,7 +205,8 @@ runs:
             set cmd:fail-exit true
             mkdir -p "${dest%/*}"
             put "$GITHUB_WORKSPACE/$src" -o "$dest"
-            LFTP_SCRIPT
+            quit
+            <<-LFTP_SCRIPT
             
             echo "UPLOAD: $src → $dest"
             lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
