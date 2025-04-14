@@ -202,11 +202,11 @@ runs:
             
             # Create secure LFTP script file
             cat > ~/lftp_commands << 'LFTP_SCRIPT'
-            set cmd:fail-exit true
-            mkdir -p "${dest%/*}"
-            put "$GITHUB_WORKSPACE/$src" -o "$dest"
-            quit
-LFTP_SCRIPT
+        set cmd:fail-exit true
+        mkdir -p "${dest%/*}"
+        put "$GITHUB_WORKSPACE/$src" -o "$dest"
+        quit
+        LFTP_SCRIPT
             
             echo "UPLOAD: $src → $dest"
             lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
