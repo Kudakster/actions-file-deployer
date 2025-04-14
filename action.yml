@@ -194,53 +194,70 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer
+
         echo "::group::Transfer files"
         function process_upload() {
-            local src="$1"
-            local dest="$2"
-            
-            # Create secure LFTP script file
-            cat > ~/lftp_commands << 'LFTP_SCRIPT'
+                local src="$1"
+                local dest="$2"
+                
+                # Create secure LFTP script file with all connection details
+                cat > ~/lftp_commands <<LFTP_SCRIPT
         set cmd:fail-exit true
+        set xfer:clobber on
+        open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
         mkdir -p "${dest%/*}"
         put "$GITHUB_WORKSPACE/$src" -o "$dest"
+        
         quit
         LFTP_SCRIPT
-            
-            echo "UPLOAD: $src → $dest"
-            lftp -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" "sftp://${{ inputs.host }}"
-            lftp -f ~/lftp_commands
-            rm -f ~/lftp_commands
+        
+                echo "UPLOAD: $src → $dest"
+                if ! lftp -f ~/lftp_commands; then
+                        echo "::error::Failed to upload $src"
+                        return 1
+                fi
+                rm -f ~/lftp_commands
         }
 
         # Process uploads
         if [ -s ~/files_to_upload ]; then
-            while IFS=$'\t' read -r src dest; do
-                if [ -f "$GITHUB_WORKSPACE/$src" ]; then
-                    process_upload "$src" "$dest"
-                else
-                    echo "::warning::File not found: $src"
+                upload_errors=0
+                while IFS=$'\t' read -r src dest; do
+                        if [ -f "$GITHUB_WORKSPACE/$src" ]; then
+                                if ! process_upload "$src" "$dest"; then
+                                        ((upload_errors++))
+                                fi
+                        else
+                                echo "::warning::File not found: $src"
+                        fi
+                done < ~/files_to_upload
+                
+                if [ $upload_errors -gt 0 ]; then
+                        echo "::error::Failed to upload $upload_errors files"
+                        exit 1
                 fi
-            done < ~/files_to_upload
         else
-            echo "No files to upload"
+                echo "No files to upload"
         fi
         echo "::endgroup::"
 
         # Process deletions
+        echo "::group::Delete files"
         if [ -s ~/files_to_delete ]; then
-          echo "Deleting files:"
-          lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
-            -p "${{ inputs.port }}" \
-            -e "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); quit" \
-            "sftp://${{ inputs.host }}"
+                cat > ~/lftp_delete_commands <<LFTP_SCRIPT
+        set cmd:fail-exit true
+        open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
+        rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete)
+        quit
+        LFTP_SCRIPT
+                
+                echo "Deleting files:"
+                if ! lftp -f ~/lftp_delete_commands; then
+                        echo "::error::Failed to delete files"
+                        exit 1
+                fi
+                rm -f ~/lftp_delete_commands
         else
-          echo "No files to delete"
+                echo "No files to delete"
         fi
-        echo "::endgroup::"
-
-        # Cleanup
-        echo "::group::Cleanup"
-        rm -f ~/.netrc ~/files_to_upload ~/files_to_delete ~/override_changes
         echo "::endgroup::"
