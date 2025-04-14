@@ -209,7 +209,8 @@ runs:
         LFTP_SCRIPT
             
             echo "UPLOAD: $src → $dest"
-            lftp -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" -f ~/lftp_commands "sftp://${{ inputs.host }}"
+            lftp -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" "sftp://${{ inputs.host }}"
+            lftp -f ~/lftp_commands
             rm -f ~/lftp_commands
         }
 
