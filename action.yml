@@ -199,10 +199,6 @@ runs:
         function process_upload() {
                 local src="$1"
                 local dest="$2"
-<<<<<<< HEAD
-                local temp_dest="temp/}"
-=======
->>>>>>> parent of b7c784a (Update action.yml)
                 
                 # Create secure LFTP script file with all connection details
                 cat > ~/lftp_commands <<LFTP_SCRIPT
