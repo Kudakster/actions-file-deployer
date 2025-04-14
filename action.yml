@@ -206,7 +206,7 @@ runs:
             mkdir -p "${dest%/*}"
             put "$GITHUB_WORKSPACE/$src" -o "$dest"
             quit
-            LFTP_SCRIPT
+LFTP_SCRIPT
             
             echo "UPLOAD: $src → $dest"
             lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
