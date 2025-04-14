@@ -199,20 +199,26 @@ runs:
         function process_upload() {
                 local src="$1"
                 local dest="$2"
+<<<<<<< HEAD
                 local temp_dest="temp/}"
+=======
+>>>>>>> parent of b7c784a (Update action.yml)
                 
+                # Create secure LFTP script file with all connection details
                 cat > ~/lftp_commands <<LFTP_SCRIPT
         set cmd:fail-exit true
         open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
-        # Upload to temporary location first
-        put "$GITHUB_WORKSPACE/$src" -o "$temp_dest"
-        # Atomic move to final location
-        mv "$temp_dest" "$dest"
+        mkdir -p "${dest%/*}"
+        put "$GITHUB_WORKSPACE/$src" -o "$dest"
+        
         quit
         LFTP_SCRIPT
-
-                echo "UPLOAD: $src → $dest (via temp)"
-                lftp -f ~/lftp_commands
+        
+                echo "UPLOAD: $src → $dest"
+                if ! lftp -f ~/lftp_commands; then
+                        echo "::error::Failed to upload $src"
+                        return 1
+                fi
                 rm -f ~/lftp_commands
         }
 
