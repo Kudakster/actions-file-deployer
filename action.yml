@@ -199,7 +199,7 @@ runs:
         function process_upload() {
                 local src="$1"
                 local dest="$2"
-                local temp_dest=".temp_${dest##*/}"
+                local temp_dest="temp/}"
                 
                 cat > ~/lftp_commands <<LFTP_SCRIPT
         set cmd:fail-exit true
