@@ -203,7 +203,6 @@ runs:
                 # Create secure LFTP script file with all connection details
                 cat > ~/lftp_commands <<LFTP_SCRIPT
         set cmd:fail-exit true
-        set xfer:clobber on
         open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
         mkdir -p "${dest%/*}"
         put "$GITHUB_WORKSPACE/$src" -o "$dest"
