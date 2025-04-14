@@ -1,4 +1,4 @@
-name: "FTP/SFTP file deployer"
+name: "SFTP File Deployer"
 description: "Advanced deployment with override support and flexible path mapping"
 
 branding:
@@ -6,22 +6,18 @@ branding:
   color: "black"
 
 inputs:
-  remote-protocol:
-    description: "Remote file transfer protocol (ftp, sftp)"
-    required: true
-    default: "sftp"
-  remote-host:
+  host:
     description: "Remote host"
     required: true
-  remote-port:
+  port:
     description: "Remote port"
     required: true
     default: 22
-  remote-user:
-    description: "FTP/SSH username"
+  user:
+    description: "Username"
     required: true
-  remote-password:
-    description: "FTP/SSH password"
+  password:
+    description: "Password"
     required: false
     default: ""
   paths:
@@ -32,12 +28,8 @@ inputs:
     description: "Path to server-specific override folder"
     required: false
     default: ""
-  sync:
-    description: "File synchronization (delta, full)"
-    required: true
-    default: "delta"
-  sync-delta-excludes:
-    description: "Files to exclude from delta sync"
+  excludes:
+    description: "Files to exclude from sync"
     required: false
   debug:
     description: "Enable debug information (true, false)"
@@ -102,87 +94,84 @@ runs:
 
         # Create lftp config
         cat > ~/.lftprc << 'EOF'
-        set ftp:ssl-protect-data true
+        set sftp:auto-confirm true
         set net:timeout 10
         set xfer:parallel 3
         set mirror:parallel-transfer-count 3
-        $([ "${{ inputs.remote-protocol }}" == "sftp" ] && echo "set sftp:auto-confirm true")
         EOF
         echo "::endgroup::"
 
-        # File processing
+        # File processing (always delta sync)
         echo "::group::Prepare files"
-        if [ "${{ inputs.sync }}" == "delta" ]; then
-          touch ~/files_to_upload ~/files_to_delete ~/override_changes
-          git_previous_commit=$(git rev-parse ${{ github.sha }}^)
+        touch ~/files_to_upload ~/files_to_delete ~/override_changes
+        git_previous_commit=$(git rev-parse ${{ github.sha }}^)
 
-          if git cat-file -t "$git_previous_commit" &>/dev/null; then
-            # Process override folder if specified
-            if [ -n "${{ inputs.override-path }}" ] && [ -d "${{ inputs.override-path }}" ]; then
-              git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "${{ inputs.override-path }}" > ~/override_changes
-            fi
+        if git cat-file -t "$git_previous_commit" &>/dev/null; then
+          # Process override folder if specified
+          if [ -n "${{ inputs.override-path }}" ] && [ -d "${{ inputs.override-path }}" ]; then
+            git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "${{ inputs.override-path }}" > ~/override_changes
+          fi
 
-            # Process each path mapping
-            for local_path in "${!path_mappings[@]}"; do
-              remote_path="${path_mappings[$local_path]}"
-              
-              # Get changes from main folder (excluding overrides)
-              git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
-              
-              # Filter out overrides if they exist
-              if [ -s ~/override_changes ]; then
-                grep -vFf <(sed "s|^${{ inputs.override-path }}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
-              else
-                cp ~/main_changes.tmp ~/filtered_changes.tmp
-              fi
-
-              # Apply sync-delta-excludes if specified
-              if [ -n "${{ inputs.sync-delta-excludes }}" ]; then
-                grep -vFf <(echo "${{ inputs.sync-delta-excludes }}" | tr ',' '\n') ~/filtered_changes.tmp > ~/filtered_changes2.tmp
-                mv ~/filtered_changes2.tmp ~/filtered_changes.tmp
-              fi
-
-              # Convert to mapping format with proper flat handling
-              awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
-                {
-                    gsub("^" local "/?", "")
-                    if ($0 != "") {
-                      if (flat == 1) {
-                          split($0, parts, "/")
-                          print local "/" $0 "\t" remote "/" parts[length(parts)]
-                      } else if (!match($0, /^(modified|rmplugins|szplugins)\//)) {
-                          print local "/" $0 "\t" remote "/" $0
-                      }
-                    }
-                }' ~/filtered_changes.tmp >> ~/files_to_upload
-
-              # Process deletions
-              git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
-              awk -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '{
-                if (flat == 1) {
-                  split($0, parts, "/")
-                  print remote "/" parts[length(parts)]
-                } else {
-                  print remote "/" $0
-                }
-              }' ~/deletions.tmp >> ~/files_to_delete
-
-              rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
-            done
-
-            # Add override changes
+          # Process each path mapping
+          for local_path in "${!path_mappings[@]}"; do
+            remote_path="${path_mappings[$local_path]}"
+            
+            # Get changes from main folder (excluding overrides)
+            git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
+            
+            # Filter out overrides if they exist
             if [ -s ~/override_changes ]; then
-              while read -r override_file; do
-                rel_path="${override_file#${{ inputs.override-path }}/}"
-                for local_path in "${!path_mappings[@]}"; do
-                  if [[ "$rel_path" == "$local_path"* ]]; then
-                    remote_path="${path_mappings[$local_path]}"
-                    echo "${{ inputs.override-path }}|$rel_path -> $remote_path/${rel_path#$local_path/}" >> ~/files_to_upload
-                    break
-                  fi
-                done
-              done < ~/override_changes
+              grep -vFf <(sed "s|^${{ inputs.override-path }}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
+            else
+              cp ~/main_changes.tmp ~/filtered_changes.tmp
             fi
+
+            # Apply excludes if specified
+            if [ -n "${{ inputs.excludes }}" ]; then
+              grep -vFf <(echo "${{ inputs.excludes }}" | tr ',' '\n') ~/filtered_changes.tmp > ~/filtered_changes2.tmp
+              mv ~/filtered_changes2.tmp ~/filtered_changes.tmp
+            fi
+
+            # Convert to mapping format with proper flat handling
+            awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
+              {
+                  gsub("^" local "/?", "")
+                  if ($0 != "") {
+                    if (flat == 1) {
+                        split($0, parts, "/")
+                        print local "/" $0 "\t" remote "/" parts[length(parts)]
+                    } else if (!match($0, /^(modified|rmplugins|szplugins)\//)) {
+                        print local "/" $0 "\t" remote "/" $0
+                    }
+                  }
+              }' ~/filtered_changes.tmp >> ~/files_to_upload
+
+            # Process deletions
+            git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
+            awk -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '{
+              if (flat == 1) {
+                split($0, parts, "/")
+                print remote "/" parts[length(parts)]
+              } else {
+                print remote "/" $0
+              }
+            }' ~/deletions.tmp >> ~/files_to_delete
+
+            rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
+          done
+
+          # Add override changes
+          if [ -s ~/override_changes ]; then
+            while read -r override_file; do
+              rel_path="${override_file#${{ inputs.override-path }}/}"
+              for local_path in "${!path_mappings[@]}"; do
+                if [[ "$rel_path" == "$local_path"* ]]; then
+                  remote_path="${path_mappings[$local_path]}"
+                  echo "${{ inputs.override-path }}|$rel_path -> $remote_path/${rel_path#$local_path/}" >> ~/files_to_upload
+                  break
+                fi
+              done
+            done < ~/override_changes
           fi
         fi
 
@@ -205,13 +194,13 @@ runs:
         fi
         echo "::endgroup::"
 
-        # File transfer with fixed LFTP script (8-space YAML indent)
+        # File transfer
         echo "::group::Transfer files"
         function process_upload() {
             local src="$1"
             local dest="$2"
             
-            # Create secure LFTP script file with proper indentation
+            # Create secure LFTP script file
             cat > ~/lftp_commands <<'LFTP_SCRIPT'
             set cmd:fail-exit true
             mkdir -p "${dest%/*}"
@@ -220,14 +209,14 @@ runs:
             LFTP_SCRIPT
             
             echo "UPLOAD: $src → $dest"
-            lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
-                -p "${{ inputs.remote-port }}" \
+            lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
+                -p "${{ inputs.port }}" \
                 -f ~/lftp_commands \
-                "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
+                "sftp://${{ inputs.host }}"
             rm -f ~/lftp_commands
         }
 
-        # Process uploads (8-space YAML indent)
+        # Process uploads
         if [ -s ~/files_to_upload ]; then
             while IFS=$'\t' read -r src dest; do
                 if [ -f "$GITHUB_WORKSPACE/$src" ]; then
@@ -244,10 +233,10 @@ runs:
         # Process deletions
         if [ -s ~/files_to_delete ]; then
           echo "Deleting files:"
-          lftp -u "${{ inputs.remote-user }}","${{ inputs.remote-password }}" \
-            -p "${{ inputs.remote-port }}" \
+          lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
+            -p "${{ inputs.port }}" \
             -e "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); quit" \
-            "${{ inputs.remote-protocol }}://${{ inputs.remote-host }}"
+            "sftp://${{ inputs.host }}"
         else
           echo "No files to delete"
         fi
