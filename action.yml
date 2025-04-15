@@ -112,9 +112,11 @@ runs:
             if [ -n "${{ inputs.override-path }}" ] && [ -d "${{ inputs.override-path }}" ]; then
                 # Get list of all files in override folder (relative to override path)
                 find "${{ inputs.override-path }}" -type f | while read -r file; do
+                    # Store both full path and relative path
                     echo "${file#${{ inputs.override-path }}/}" >> ~/override_files
+                    echo "$file" >> ~/override_files_full
                 done
-                
+
                 # Get changes in override folder (relative to repo root)
                 git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "${{ inputs.override-path }}" > ~/override_changes
             fi
@@ -122,28 +124,25 @@ runs:
             # Process each path mapping
             for local_path in "${!path_mappings[@]}"; do
                 remote_path="${path_mappings[$local_path]}"
-                
+
                 # Get changes from main folder (relative to repo root)
                 git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
-                
+
                 # Find and log blocked changes (files that exist in override folder)
-                if [ -s ~/override_files ] && [ -s ~/main_changes.tmp ]; then
-                    # Create file with main changes relative to local_path
-                    sed "s|^$local_path/||" ~/main_changes.tmp > ~/main_changes_rel.tmp
-                    
-                    # Find exact matches with override files
-                    grep -Fxf ~/override_files ~/main_changes_rel.tmp > ~/blocked_changes.tmp || true
-                    
+                if [ -s ~/override_files_full ] && [ -s ~/main_changes.tmp ]; then
+                    # Check for matches with full paths
+                    grep -Fxf ~/override_files_full ~/main_changes.tmp > ~/blocked_changes.tmp || true
+
                     if [ -s ~/blocked_changes.tmp ]; then
                         echo "Blocked changes in $local_path (overridden files):" >> ~/blocked_changes
                         cat ~/blocked_changes.tmp | sed 's/^/    /' >> ~/blocked_changes
                         echo "" >> ~/blocked_changes
+
+                        # Filter out blocked files from main changes
+                        grep -vFxf ~/blocked_changes.tmp ~/main_changes.tmp > ~/filtered_changes.tmp
+                    else
+                        cp ~/main_changes.tmp ~/filtered_changes.tmp
                     fi
-                    
-                    # Filter out overridden files
-                    grep -vFxf ~/override_files ~/main_changes_rel.tmp > ~/filtered_changes_rel.tmp || true
-                    # Restore full paths
-                    awk -v local="$local_path" '{print local "/" $0}' ~/filtered_changes_rel.tmp > ~/filtered_changes.tmp
                 else
                     cp ~/main_changes.tmp ~/filtered_changes.tmp
                 fi
@@ -192,12 +191,12 @@ runs:
                 rm -f ~/main_changes*.tmp ~/filtered_changes*.tmp ~/deletions*.tmp ~/blocked_changes.tmp
             done
 
-            # Process override changes - fixed version
+            # Process override changes
             if [ -s ~/override_changes ]; then
                 while read -r override_file; do
                     # Get path relative to override folder
                     rel_path="${override_file#${{ inputs.override-path }}/}"
-                    
+
                     # Find matching local_path
                     for local_path in "${!path_mappings[@]}"; do
                         if [[ "$rel_path" == "$local_path"* ]]; then
