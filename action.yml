@@ -104,46 +104,65 @@ runs:
 
         # File processing (always delta sync)
         echo "::group::Prepare files"
-        touch ~/files_to_upload ~/files_to_delete ~/override_changes ~/override_files ~/blocked_changes
+        touch ~/files_to_upload ~/files_to_delete ~/override_changes ~/override_files ~/blocked_changes ~/debug_log
         git_previous_commit=$(git rev-parse ${{ github.sha }}^)
 
         if git cat-file -t "$git_previous_commit" &>/dev/null; then
             # Process override folder if specified
             if [ -n "${{ inputs.override-path }}" ] && [ -d "${{ inputs.override-path }}" ]; then
-                # Get list of all files in override folder (relative to override path)
-                find "${{ inputs.override-path }}" -type f | while read -r file; do
-                    # Store both full path and relative path
-                    echo "${file#${{ inputs.override-path }}/}" >> ~/override_files
-                    echo "$file" >> ~/override_files_full
-                done
+                echo "DEBUG: Processing override folder ${{ inputs.override-path }}" >> ~/debug_log
+                echo "DEBUG: Contents of override folder:" >> ~/debug_log
+                find "${{ inputs.override-path }}" -type f | tee -a ~/debug_log | sed "s|^${{ inputs.override-path }}/||" > ~/override_files
 
-                # Get changes in override folder (relative to repo root)
+                # Store full paths for exact matching
+                find "${{ inputs.override-path }}" -type f > ~/override_files_full
+                echo "DEBUG: Stored override files (full paths):" >> ~/debug_log
+                cat ~/override_files_full >> ~/debug_log
+
+                # Get changes in override folder
                 git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "${{ inputs.override-path }}" > ~/override_changes
+                echo "DEBUG: Override changes detected:" >> ~/debug_log
+                cat ~/override_changes >> ~/debug_log
+            else
+                echo "DEBUG: No override folder specified or folder doesn't exist" >> ~/debug_log
             fi
 
             # Process each path mapping
             for local_path in "${!path_mappings[@]}"; do
                 remote_path="${path_mappings[$local_path]}"
+                echo "DEBUG: Processing path mapping: $local_path → $remote_path" >> ~/debug_log
 
-                # Get changes from main folder (relative to repo root)
+                # Get changes from main folder
                 git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
+                echo "DEBUG: Main folder changes detected:" >> ~/debug_log
+                cat ~/main_changes.tmp >> ~/debug_log
 
-                # Find and log blocked changes (files that exist in override folder)
+                # Find and log blocked changes
                 if [ -s ~/override_files_full ] && [ -s ~/main_changes.tmp ]; then
-                    # Check for matches with full paths
+                    echo "DEBUG: Checking for files to block..." >> ~/debug_log
+                    echo "DEBUG: Comparing against these override files:" >> ~/debug_log
+                    cat ~/override_files_full >> ~/debug_log
+
+                    # Find exact matches with override files
                     grep -Fxf ~/override_files_full ~/main_changes.tmp > ~/blocked_changes.tmp || true
+                    echo "DEBUG: Found these matches to block:" >> ~/debug_log
+                    cat ~/blocked_changes.tmp >> ~/debug_log
 
                     if [ -s ~/blocked_changes.tmp ]; then
                         echo "Blocked changes in $local_path (overridden files):" >> ~/blocked_changes
                         cat ~/blocked_changes.tmp | sed 's/^/    /' >> ~/blocked_changes
                         echo "" >> ~/blocked_changes
 
-                        # Filter out blocked files from main changes
+                        # Filter out blocked files
                         grep -vFxf ~/blocked_changes.tmp ~/main_changes.tmp > ~/filtered_changes.tmp
+                        echo "DEBUG: After filtering, these changes remain:" >> ~/debug_log
+                        cat ~/filtered_changes.tmp >> ~/debug_log
                     else
+                        echo "DEBUG: No files to block for $local_path" >> ~/debug_log
                         cp ~/main_changes.tmp ~/filtered_changes.tmp
                     fi
                 else
+                    echo "DEBUG: No override files or no main changes to check" >> ~/debug_log
                     cp ~/main_changes.tmp ~/filtered_changes.tmp
                 fi
 
@@ -189,6 +208,9 @@ runs:
                 }' ~/filtered_deletions.tmp >> ~/files_to_delete
 
                 rm -f ~/main_changes*.tmp ~/filtered_changes*.tmp ~/deletions*.tmp ~/blocked_changes.tmp
+
+                echo "DEBUG: Final files to upload from $local_path:" >> ~/debug_log
+                grep "^$local_path/" ~/files_to_upload >> ~/debug_log || true
             done
 
             # Process override changes
@@ -215,11 +237,23 @@ runs:
                     done
                 done < ~/override_changes
             fi
+
+            echo "DEBUG: Before removing duplicates:" >> ~/debug_log
+            echo "DEBUG: All files to upload:" >> ~/debug_log
+            cat ~/files_to_upload >> ~/debug_log || true
+            echo "DEBUG: All files to delete:" >> ~/debug_log
+            cat ~/files_to_delete >> ~/debug_log || true
         fi
 
         # Remove duplicates
         sort -u ~/files_to_upload -o ~/files_to_upload
         sort -u ~/files_to_delete -o ~/files_to_delete
+
+        # Final debug output
+        echo "::group::Debug Details"
+        echo "Full debug log:"
+        cat ~/debug_log | sed 's/^/    /'
+        echo "::endgroup::"
 
         # Debug output
         if [ "${{ inputs.debug }}" == "true" ]; then
