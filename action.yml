@@ -224,12 +224,6 @@ runs:
         sort -u ~/files_to_upload -o ~/files_to_upload
         sort -u ~/files_to_delete -o ~/files_to_delete
 
-        # Final debug output
-        echo "::group::Debug Details"
-        echo "Full debug log:"
-        cat ~/debug_log | sed 's/^/    /'
-        echo "::endgroup::"
-
         # Debug output
         if [ "${{ inputs.debug }}" == "true" ]; then
             echo "::group::File Changes"
