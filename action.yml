@@ -199,6 +199,9 @@ runs:
         function process_upload() {
                 local src="$1"
                 local dest="$2"
+
+                # Extract the remote directory path from destination
+                remote_dir="${dest%/*}"
                 
                 # Create secure LFTP script file with all connection details
                 cat > ~/lftp_commands <<LFTP_SCRIPT
