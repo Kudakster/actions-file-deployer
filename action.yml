@@ -145,8 +145,46 @@ runs:
                     cp ~/main_changes.tmp ~/filtered_changes.tmp
                 fi
 
-                # Rest of the processing...
-                # [Keep existing code for excludes, mapping format, etc.]
+                # Apply excludes if specified
+                if [ -n "${{ inputs.excludes }}" ]; then
+                    grep -vFf <(echo "${{ inputs.excludes }}" | tr ',' '\n') ~/filtered_changes.tmp > ~/filtered_changes2.tmp
+                    mv ~/filtered_changes2.tmp ~/filtered_changes.tmp
+                fi
+
+                # Convert to mapping format with proper flat handling
+                awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '
+                    {
+                        gsub("^" local "/?", "")
+                        if ($0 != "") {
+                            if (flat == 1) {
+                                split($0, parts, "/")
+                                print local "/" $0 "\t" remote "/" parts[length(parts)]
+                            } else {
+                                print local "/" $0 "\t" remote "/" $0
+                            }
+                        }
+                    }' ~/filtered_changes.tmp >> ~/files_to_upload
+
+                # Process deletions - only for files not in override folder
+                git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
+                if [ -s ~/override_files ]; then
+                    grep -vFf ~/override_files ~/deletions.tmp > ~/filtered_deletions.tmp
+                else
+                    cp ~/deletions.tmp ~/filtered_deletions.tmp
+                fi
+                
+                awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '{
+                    # Remove the local path prefix
+                    gsub("^" local "/?", "", $0)
+                    if (flat == 1) {
+                        split($0, parts, "/")
+                        print remote "/" parts[length(parts)]
+                    } else {
+                        print remote "/" $0
+                    }
+                }' ~/filtered_deletions.tmp >> ~/files_to_delete
+
+                rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp ~/filtered_deletions.tmp ~/blocked_changes.tmp
             done
 
             # Process override changes
