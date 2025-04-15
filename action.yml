@@ -204,7 +204,7 @@ runs:
                 cat > ~/lftp_commands <<LFTP_SCRIPT
         set cmd:fail-exit true
         open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
-        # mkdir -p "${dest%/*}"
+        mkdir -p "${dest%/*}"
         put "$GITHUB_WORKSPACE/$src" -o "$dest"
         
         quit
