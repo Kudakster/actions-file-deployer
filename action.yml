@@ -148,7 +148,9 @@ runs:
 
             # Process deletions
             git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
-            awk -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '{
+            awk -v local="$local_path" -v remote="$remote_path" -v flat="${flatten_flags[$local_path]}" '{
+              # Remove the local path prefix
+              gsub("^" local "/?", "", $0)
               if (flat == 1) {
                 split($0, parts, "/")
                 print remote "/" parts[length(parts)]
