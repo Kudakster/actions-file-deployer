@@ -1,5 +1,5 @@
 name: "SFTP File Deployer"
-description: "Fast delta-sync deployment with parallel connections"
+description: "Advanced deployment with override support and flexible path mapping"
 
 branding:
   icon: "upload"  
@@ -14,16 +14,20 @@ inputs:
     required: true
     default: 22
   user:
-    description: "SSH username"
+    description: "Username"
     required: true
   password:
-    description: "SSH password"
+    description: "Password"
     required: false
     default: ""
   paths:
     description: "Path mappings in JSON format (add :flat suffix to flatten)"
     required: true
     default: '{".": "."}'
+  override-path:
+    description: "Path to server-specific override folder"
+    required: false
+    default: ""
   excludes:
     description: "Files to exclude from sync"
     required: false
@@ -97,23 +101,35 @@ runs:
         EOF
         echo "::endgroup::"
 
-        # File processing (delta sync only)
+        # File processing (always delta sync)
         echo "::group::Prepare files"
         touch ~/files_to_upload ~/files_to_delete ~/override_changes
         git_previous_commit=$(git rev-parse ${{ github.sha }}^)
 
         if git cat-file -t "$git_previous_commit" &>/dev/null; then
+          # Process override folder if specified
+          if [ -n "${{ inputs.override-path }}" ] && [ -d "${{ inputs.override-path }}" ]; then
+            git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "${{ inputs.override-path }}" > ~/override_changes
+          fi
+
           # Process each path mapping
           for local_path in "${!path_mappings[@]}"; do
             remote_path="${path_mappings[$local_path]}"
             
-            # Get changes from main folder
+            # Get changes from main folder (excluding overrides)
             git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
             
+            # Filter out overrides if they exist
+            if [ -s ~/override_changes ]; then
+              grep -vFf <(sed "s|^${{ inputs.override-path }}/||" ~/override_changes) ~/main_changes.tmp > ~/filtered_changes.tmp
+            else
+              cp ~/main_changes.tmp ~/filtered_changes.tmp
+            fi
+
             # Apply excludes if specified
             if [ -n "${{ inputs.excludes }}" ]; then
-              grep -vFf <(echo "${{ inputs.excludes }}" | tr ',' '\n') ~/main_changes.tmp > ~/filtered_changes.tmp
-              mv ~/filtered_changes.tmp ~/main_changes.tmp
+              grep -vFf <(echo "${{ inputs.excludes }}" | tr ',' '\n') ~/filtered_changes.tmp > ~/filtered_changes2.tmp
+              mv ~/filtered_changes2.tmp ~/filtered_changes.tmp
             fi
 
             # Convert to mapping format with proper flat handling
@@ -124,11 +140,11 @@ runs:
                     if (flat == 1) {
                         split($0, parts, "/")
                         print local "/" $0 "\t" remote "/" parts[length(parts)]
-                    } else {
+                    } else if (!match($0, /^(modified|rmplugins|szplugins)\//)) {
                         print local "/" $0 "\t" remote "/" $0
                     }
                   }
-              }' ~/main_changes.tmp >> ~/files_to_upload
+              }' ~/filtered_changes.tmp >> ~/files_to_upload
 
             # Process deletions
             git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
@@ -141,8 +157,22 @@ runs:
               }
             }' ~/deletions.tmp >> ~/files_to_delete
 
-            rm -f ~/main_changes.tmp ~/deletions.tmp
+            rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp
           done
+
+          # Add override changes
+          if [ -s ~/override_changes ]; then
+            while read -r override_file; do
+              rel_path="${override_file#${{ inputs.override-path }}/}"
+              for local_path in "${!path_mappings[@]}"; do
+                if [[ "$rel_path" == "$local_path"* ]]; then
+                  remote_path="${path_mappings[$local_path]}"
+                  echo "${{ inputs.override-path }}|$rel_path -> $remote_path/${rel_path#$local_path/}" >> ~/files_to_upload
+                  break
+                fi
+              done
+            done < ~/override_changes
+          fi
         fi
 
         # Remove duplicates
@@ -157,65 +187,47 @@ runs:
           show_hr
           echo "Files to delete:"
           [ -s ~/files_to_delete ] && cat ~/files_to_delete || echo "None"
+          show_hr
+          echo "Override changes:"
+          [ -s ~/override_changes ] && cat ~/override_changes || echo "None"
           echo "::endgroup::"
         fi
         echo "::endgroup::"
 
-        # File transfer using improved delta sync method
+
+        # File transfer section
         echo "::group::Transfer files"
         
-        # Create marker file
-        touch ~/.deploy-running
+        # Create temporary marker file
+        touch "${local_path_slash}.deploy-running"
         
-        function process_upload_batch() {
-          local local_base="$1"
-          local remote_base="$2"
-          
-          # Create LFTP script for batch upload
-          cat > ~/lftp_upload_script <<EOF
-        set xfer:log true
-        set cmd:fail-exit true
-        lcd "$local_base"
-        put -O "$remote_base" ~/.deploy-running
-        mput -d -O "$remote_base" $(awk '{ printf "\"%s\" ", $1 }' ~/files_to_upload)
-        rm -f "$remote_base/.deploy-running"
-        quit
-        EOF
-          
-          lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
-            -p "${{ inputs.port }}" \
-            -f ~/lftp_upload_script \
-            "sftp://${{ inputs.host }}"
-            
-          rm -f ~/lftp_upload_script
-        }
-
-        # Process deletions
-        if [ -s ~/files_to_delete ]; then
-          echo "Deleting files:"
-          lftp -u "${{ inputs.user }}","${{ inputs.password }}" \
-            -p "${{ inputs.port }}" \
-            -e "rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete); quit" \
-            "sftp://${{ inputs.host }}"
+        if [ -s ~/files_to_upload ]; then
+          # Delta sync upload using mput
+          ${proxy_cmd} lftp -c "lcd \"${local_path_unslash}\";
+            put -O \"${remote_path_unslash}\" \"${local_path_slash}.deploy-running\";
+            mput -d -O \"${remote_path_unslash}\" $(awk '{ printf "\"%s\" ", $0 }' ~/files_to_upload);
+            rm -f \"${remote_path_slash}.deploy-running\""
         fi
-
-        # Process uploads in batches per path mapping
-        for local_path in "${!path_mappings[@]}"; do
-          remote_path="${path_mappings[$local_path]}"
-          awk -v local="$local_path" '$1 ~ "^" local "/" {print $0}' ~/files_to_upload > ~/current_batch.txt
-          
-          if [ -s ~/current_batch.txt ]; then
-            echo "Processing batch for: $local_path → $remote_path"
-            process_upload_batch "$local_path" "$remote_path"
-          fi
-          
-          rm -f ~/current_batch.txt
-        done
-
-        rm -f ~/.deploy-running
+        
         echo "::endgroup::"
 
-        # Cleanup
-        echo "::group::Cleanup"
-        rm -f ~/.netrc ~/files_to_upload ~/files_to_delete ~/override_changes
+        # Process deletions
+        echo "::group::Delete files"
+        if [ -s ~/files_to_delete ]; then
+                cat > ~/lftp_delete_commands <<LFTP_SCRIPT
+        set cmd:fail-exit true
+        open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
+        rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete)
+        quit
+        LFTP_SCRIPT
+                
+                echo "Deleting files:"
+                if ! lftp -f ~/lftp_delete_commands; then
+                        echo "::error::Failed to delete files"
+                        exit 1
+                fi
+                rm -f ~/lftp_delete_commands
+        else
+                echo "No files to delete"
+        fi
         echo "::endgroup::"
