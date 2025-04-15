@@ -111,7 +111,10 @@ runs:
             # Process override folder if specified
             if [ -n "${{ inputs.override-path }}" ] && [ -d "${{ inputs.override-path }}" ]; then
                 # Get list of all files in override folder (relative to override path)
-                find "${{ inputs.override-path }}" -type f | sed "s|^${{ inputs.override-path }}/||" | sort > ~/override_files
+                find "${{ inputs.override-path }}" -type f | while read -r file; do
+                    echo "${file#${{ inputs.override-path }}/}" >> ~/override_files
+                done
+                
                 # Get changes in override folder (relative to repo root)
                 git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "${{ inputs.override-path }}" > ~/override_changes
             fi
@@ -125,10 +128,10 @@ runs:
                 
                 # Find and log blocked changes (files that exist in override folder)
                 if [ -s ~/override_files ] && [ -s ~/main_changes.tmp ]; then
-                    # Convert main changes to relative paths (relative to local_path)
+                    # Create file with main changes relative to local_path
                     sed "s|^$local_path/||" ~/main_changes.tmp > ~/main_changes_rel.tmp
                     
-                    # Find matches with override files
+                    # Find exact matches with override files
                     grep -Fxf ~/override_files ~/main_changes_rel.tmp > ~/blocked_changes.tmp || true
                     
                     if [ -s ~/blocked_changes.tmp ]; then
@@ -168,7 +171,9 @@ runs:
                 # Process deletions - only for files not in override folder
                 git diff-tree --diff-filter=D --name-only -t "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/deletions.tmp
                 if [ -s ~/override_files ]; then
-                    grep -vFf ~/override_files ~/deletions.tmp > ~/filtered_deletions.tmp
+                    sed "s|^$local_path/||" ~/deletions.tmp > ~/deletions_rel.tmp
+                    grep -vFxf ~/override_files ~/deletions_rel.tmp > ~/filtered_deletions_rel.tmp || true
+                    awk -v local="$local_path" '{print local "/" $0}' ~/filtered_deletions_rel.tmp > ~/filtered_deletions.tmp
                 else
                     cp ~/deletions.tmp ~/filtered_deletions.tmp
                 fi
@@ -184,10 +189,10 @@ runs:
                     }
                 }' ~/filtered_deletions.tmp >> ~/files_to_delete
 
-                rm -f ~/main_changes.tmp ~/filtered_changes.tmp ~/deletions.tmp ~/filtered_deletions.tmp ~/blocked_changes.tmp
+                rm -f ~/main_changes*.tmp ~/filtered_changes*.tmp ~/deletions*.tmp ~/blocked_changes.tmp
             done
 
-            # Process override changes
+            # Process override changes - fixed version
             if [ -s ~/override_changes ]; then
                 while read -r override_file; do
                     # Get path relative to override folder
@@ -226,7 +231,7 @@ runs:
             echo "Files to delete:"
             [ -s ~/files_to_delete ] && cat ~/files_to_delete | sed 's/^/    /' || echo "    None"
             show_hr
-            echo "Override changes:"
+            echo "Override changes detected:"
             [ -s ~/override_changes ] && cat ~/override_changes | sed 's/^/    /' || echo "    None"
             show_hr
             echo "Blocked changes (main folder overridden by override folder):"
