@@ -110,11 +110,9 @@ runs:
         if git cat-file -t "$git_previous_commit" &>/dev/null; then
             # Process override folder if specified
             if [ -n "${{ inputs.override-path }}" ] && [ -d "${{ inputs.override-path }}" ]; then
-                # Get list of all files in override folder (relative paths)
-                find "${{ inputs.override-path }}" -type f | while read -r file; do
-                    echo "${file#${{ inputs.override-path }}/}" >> ~/override_files
-                done
-                # Get changes in override folder
+                # Get list of all files in override folder (relative to override path)
+                find "${{ inputs.override-path }}" -type f | sed "s|^${{ inputs.override-path }}/||" | sort > ~/override_files
+                # Get changes in override folder (relative to repo root)
                 git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "${{ inputs.override-path }}" > ~/override_changes
             fi
 
@@ -122,16 +120,16 @@ runs:
             for local_path in "${!path_mappings[@]}"; do
                 remote_path="${path_mappings[$local_path]}"
                 
-                # Get changes from main folder
+                # Get changes from main folder (relative to repo root)
                 git diff --diff-filter=ACMRT --name-only "$git_previous_commit"..${{ github.sha }} -- "$local_path" > ~/main_changes.tmp
                 
                 # Find and log blocked changes (files that exist in override folder)
-                if [ -s ~/override_files ]; then
-                    # Create relative paths for comparison
+                if [ -s ~/override_files ] && [ -s ~/main_changes.tmp ]; then
+                    # Convert main changes to relative paths (relative to local_path)
                     sed "s|^$local_path/||" ~/main_changes.tmp > ~/main_changes_rel.tmp
                     
                     # Find matches with override files
-                    grep -Ff ~/override_files ~/main_changes_rel.tmp > ~/blocked_changes.tmp || true
+                    grep -Fxf ~/override_files ~/main_changes_rel.tmp > ~/blocked_changes.tmp || true
                     
                     if [ -s ~/blocked_changes.tmp ]; then
                         echo "Blocked changes in $local_path (overridden files):" >> ~/blocked_changes
@@ -140,30 +138,35 @@ runs:
                     fi
                     
                     # Filter out overridden files
-                    grep -vFf ~/override_files ~/main_changes_rel.tmp > ~/filtered_changes_rel.tmp || true
+                    grep -vFxf ~/override_files ~/main_changes_rel.tmp > ~/filtered_changes_rel.tmp || true
                     # Restore full paths
                     awk -v local="$local_path" '{print local "/" $0}' ~/filtered_changes_rel.tmp > ~/filtered_changes.tmp
                 else
                     cp ~/main_changes.tmp ~/filtered_changes.tmp
                 fi
 
-                # Rest of the processing remains the same...
-                # [Keep all the existing code for excludes, mapping format, deletions etc.]
+                # Rest of the processing...
+                # [Keep existing code for excludes, mapping format, etc.]
             done
 
-            # Add override changes
+            # Process override changes
             if [ -s ~/override_changes ]; then
                 while read -r override_file; do
+                    # Get path relative to override folder
                     rel_path="${override_file#${{ inputs.override-path }}/}"
+                    
+                    # Find matching local_path
                     for local_path in "${!path_mappings[@]}"; do
                         if [[ "$rel_path" == "$local_path"* ]]; then
                             remote_path="${path_mappings[$local_path]}"
                             # For flat paths, use just the filename
                             if [ ${flatten_flags[$local_path]} -eq 1 ]; then
                                 filename=$(basename "$rel_path")
-                                echo "$override_file\t$remote_path/$filename" >> ~/files_to_upload
+                                echo -e "$override_file\t$remote_path/$filename" >> ~/files_to_upload
                             else
-                                echo "$override_file\t$remote_path/${rel_path#$local_path/}" >> ~/files_to_upload
+                                # Remove local_path prefix from rel_path
+                                sub_path="${rel_path#$local_path/}"
+                                echo -e "$override_file\t$remote_path/$sub_path" >> ~/files_to_upload
                             fi
                             break
                         fi
