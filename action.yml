@@ -204,7 +204,12 @@ runs:
                 cat > ~/lftp_commands <<LFTP_SCRIPT
         set cmd:fail-exit true
         open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
-        mkdir -p "${dest%/*}"
+        
+        # First check if the directory exists
+        if (! $LFTP_AT_EXIT || ! test -d "$remote_dir"); then
+          mkdir -p "$remote_dir"
+        end
+        
         put "$GITHUB_WORKSPACE/$src" -o "$dest"
         
         quit
