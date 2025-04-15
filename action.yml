@@ -251,19 +251,27 @@ runs:
         # Process deletions
         echo "::group::Delete files"
         if [ -s ~/files_to_delete ]; then
+                # Create LFTP script with proper deletion commands
                 cat > ~/lftp_delete_commands <<LFTP_SCRIPT
         set cmd:fail-exit true
         open -u "${{ inputs.user }}","${{ inputs.password }}" -p "${{ inputs.port }}" sftp://${{ inputs.host }}
-        rm -f $(awk '{printf "\"%s\" ", $0}' ~/files_to_delete)
+
+        # Process each file to delete
+        $(while read -r file; do echo "rm -f \"$file\""; done < ~/files_to_delete)
+
         quit
         LFTP_SCRIPT
+
+                echo "Files to be deleted:"
+                cat ~/files_to_delete
+                show_hr
                 
-                echo "Deleting files:"
                 if ! lftp -f ~/lftp_delete_commands; then
                         echo "::error::Failed to delete files"
                         exit 1
                 fi
                 rm -f ~/lftp_delete_commands
+                echo "Files deleted successfully"
         else
                 echo "No files to delete"
         fi
